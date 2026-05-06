@@ -44,11 +44,7 @@ The SSH account needs filesystem permissions for the target database:
 
 Read/write is the default. The driver starts `sqlite3` without `-readonly` and allows write SQL unless `readonly=true` is set. For read-only sessions, set `readonly=true`; the driver passes `-readonly` and rejects mutations.
 
-Make sure your local `known_hosts` has the server key:
-
-```bash
-ssh-keyscan -H db.example.org >> ~/.ssh/known_hosts
-```
+Host-key verification uses the normal SSH known-hosts file by default: `~/.ssh/known_hosts`. You can override it with `ssh.knownHosts` or common desktop-tool known-hosts fields.
 
 ## JDBC URL
 
