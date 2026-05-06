@@ -11,22 +11,15 @@
 
 SSHSQLite is a JDBC driver for opening a remote SQLite database through SSH. The Java driver connects to the server over SSH, verifies the host key, starts the remote `sqlite3` CLI, and sends SQL over stdin while parsing stable CLI output.
 
-## Build
+## Grab The Jar
 
-Build the full distribution:
-
-```bash
-./gradlew verify packageRelease
-```
-
-Artifacts:
+Most people should just use the prebuilt jar in this repo:
 
 ```text
-build/distributions/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
-build/distributions/sshsqlite-release-metadata.json
-build/distributions/sshsqlite-gradle-runtime-dependencies.json
-build/distributions/sshsqlite_SHA256SUMS
+dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
 ```
+
+Add that jar to your database tool's custom JDBC driver libraries.
 
 The driver jar is compiled for Java 11 (`--release 11`) so it works in desktop database tools that still run on a Java 11 runtime.
 
@@ -107,38 +100,31 @@ Set `readonly=true` only when you want a read-only session. Production write acc
 
 If you use password auth instead of a key, set the normal DBeaver password field or set `ssh.password` as a driver property. Do not put passwords or private key material in the JDBC URL.
 
-## DataGrip Setup
+## Build Yourself
 
-The same values work in DataGrip's custom driver dialog:
+If you want to rebuild the jar yourself, run:
+
+```bash
+./build.sh
+```
+
+That writes:
 
 ```text
-Driver Name: SSHSQLite
-Class Name: org.sshsqlite.jdbc.SshSqliteDriver
-URL Template: jdbc:sshsqlite://{host}:{port}/{database}
-Default Port: 22
-Driver Type: Generic
+dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
+dist/sshsqlite_SHA256SUMS
 ```
 
-Add the same jar in the **Libraries** tab and use the same JDBC URL/properties shown above.
-
-## Useful Commands
-
-Run local checks:
+Full local verification:
 
 ```bash
-./gradlew verify
+./gradlew verify packageRelease
 ```
 
-Run integration checks:
+Optional pre-commit hook:
 
 ```bash
-./gradlew verifyIntegration
-```
-
-Build release artifacts:
-
-```bash
-./gradlew packageRelease
+ln -sf ../../.githooks/pre-commit .git/hooks/pre-commit
 ```
 
 Inspect remote sqlite3 diagnostics:
