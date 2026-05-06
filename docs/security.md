@@ -33,7 +33,7 @@ Security goals:
 - Prevent network man-in-the-middle attacks through mandatory SSH host-key verification.
 - Prevent command injection when starting `sqlite3`.
 - Use least-privilege SSH accounts and safe path handling for database file access.
-- Treat optional helper tampering controls as helper-mode only.
+- Treat helper integrity, helper allowlists, and helper installation as optional helper-mode controls only.
 - Avoid leaking secrets through URLs, logs, exceptions, helper stderr, or protocol traces.
 - Preserve SQLite locking semantics and avoid corrupting live databases.
 
@@ -59,8 +59,8 @@ Requirements:
 - OpenSSH hashed host entries, bracketed `[host]:port` entries, `@revoked` markers, and non-default ports must be supported or explicitly rejected with a clear error.
 - Host certificates and `@cert-authority` entries must be either supported correctly or explicitly unsupported; they must not fall back to trust-all behavior.
 - Host aliases and canonical DNS behavior must be deterministic and documented.
-- Prefer modern host-key algorithms such as `ssh-ed25519` and `rsa-sha2-*`.
-- Do not accept deprecated `ssh-rsa` SHA-1 signatures unless explicitly configured for a legacy host.
+- Prefer modern host-key algorithms such as `ssh-ed25519` and `rsa-sha2-*` in `known_hosts`.
+- The current driver verifies the presented key against `known_hosts` and relies on Apache SSHD/JVM algorithm policy for signature negotiation; it does not add a separate driver-level `ssh-rsa` denylist.
 
 Known-host lookup identity:
 
@@ -72,28 +72,29 @@ Known-host lookup identity:
 
 ## Production Mode
 
-Production-safe behavior is the default.
+Strict connection behavior is the default where the current driver implements a control. This project is still experimental and should not be treated as production-safe solely because these defaults exist.
 
 - There is no implicit development mode.
 - Any development override must be explicitly named, for example `developmentMode=true`.
-- Development mode may relax signing or host-key learning only where the docs explicitly say so.
-- Production mode fails closed when required production inputs are absent: known host, safe `sqlite3.path` configuration, and signed release provenance for driver artifacts.
+- Development mode may relax future host-key learning or provenance checks only where the docs explicitly say so. The current driver still uses known-host verification.
+- Production mode fails closed when required connection inputs are absent or unsafe: known host, authentication identity, database path, and a validated `sqlite3.path` value. Release artifact provenance is an operator/distribution concern, not a JDBC connection requirement.
 
 ## SSH Authentication
 
 Production should prefer key-based authentication.
 
-Supported authentication order is explicit and deterministic:
+Supported authentication is explicit and deterministic:
 
-1. Configured private key, if provided.
-2. Password, if provided and allowed.
+1. A configured private key, or the first discovered standard `~/.ssh` private key, if present.
+2. Password, if provided through JDBC properties or desktop-tool credential aliases.
 
 Requirements:
 
 - Support encrypted private keys through passphrases supplied out of band.
 - Do not put passwords, private key material, or passphrases in the JDBC URL.
-- Accept secrets through connection properties, desktop-tool credential stores, or environment-specific secret providers.
+- Accept secrets through connection properties and desktop-tool credential stores. Common JDBC aliases such as `user`, `username`, `password`, `privateKey`, `identityFile`, `knownHosts`, and `passphrase` are accepted, with explicit `ssh.*` properties taking precedence.
 - SSH agent authentication is disabled in the self-contained desktop-tool jar because Apache SSHD's Unix agent support depends on optional native APR/Tomcat classes.
+- If `ssh.agent=true` is requested with a configured key or password, the driver still uses the configured non-agent authentication and does not load native agent support. Agent-only authentication fails clearly.
 - Do not log secrets or full connection properties.
 - Hold secrets in memory only as long as required where the Java/SSH library permits.
 - Authentication failure messages must not reveal more than normal SSH semantics.
@@ -119,7 +120,7 @@ Allowed production command shape after validation and escaping:
 /usr/bin/sqlite3 -batch /absolute/path/database.db
 ```
 
-Optional trusted config paths may be fixed by deployment policy, but they must not come from untrusted JDBC URL values.
+Operators should prefer setting sensitive paths such as `sqlite3.path` through trusted connection configuration rather than user-editable JDBC URL text.
 
 Rejected `sqlite3.path` examples:
 
@@ -132,26 +133,18 @@ Rejected `sqlite3.path` examples:
 
 ## Database Path Authorization
 
-Canonical CLI mode relies on SSH account permissions and server operator controls for database file access. Driver-side path validation prevents accidental unsafe command construction, but it is not a server-side authorization boundary.
+Canonical CLI mode does not require a server-side helper, path allowlist, or helper configuration. It relies on the remote SSH account, Unix filesystem permissions, and the remote `sqlite3` process running on the same host as the database.
 
-Requirements:
+Requirements for normal CLI deployments:
 
 - Use a least-privilege SSH account with filesystem permissions only for intended database files.
-- Canonicalize the requested `db.path` with symlink resolution before authorization.
-- Allowlisted directories must not be writable by untrusted users.
-- Reject symlink database files unless symlinks are explicitly allowed and the resolved target is authorized.
-- Reject paths outside the allowlist after canonicalization.
-- Reject relative paths unless explicitly resolved against a configured base directory.
-- Reject paths containing NUL bytes or invalid encoding.
-- Reject non-regular files unless explicitly allowed.
-- Open the database only after safe path parsing and command construction.
-- Use race-resistant open patterns where practical. If the platform cannot make canonicalize-then-open race-free, require allowlisted parent directories to be trusted and non-writable by attackers.
-- Apply the same authorization to SQLite sidecar and write-target files, including `-wal`, `-shm`, rollback journals, temporary files, and `VACUUM INTO` destinations.
-- `ATTACH` and `VACUUM INTO` are denied by default. If either is enabled, the helper must authorize the resolved destination path before execution.
-- WAL, shared-memory, journal, and temp-file creation require trusted database parent directories that are not writable by attackers.
+- Treat `db.path` as a remote SQLite filename, not as a driver-side authorization decision.
+- Quote the database path when constructing the remote command so shell metacharacters are not interpreted.
 - Do not rely on client-side URL validation as a security boundary.
+- Keep database directories trusted and not writable by attackers, because SQLite may create `-wal`, `-shm`, rollback journal, and temporary files next to the database or in SQLite-selected temp locations.
+- Remember that `ATTACH` and `VACUUM INTO` are normal SQLite operations in read/write CLI mode. Restrict them with SSH account permissions, filesystem layout, or an optional policy backend if your deployment needs path-level controls.
 
-Optional helper mode may provide a server-side allowlist. Normal CLI mode has no helper allowlist requirement.
+Optional helper or direct SQLite policy backends may provide server-side canonicalization and allowlists. Those controls are not required for normal desktop-tool setup.
 
 ### Optional Helper Allowlist Configuration
 
@@ -174,7 +167,7 @@ Minimal schema:
   ],
   "directoryPrefixes": [
     {
-      "path": "/srv/gmod/garrysmod/readonly-dbs",
+      "path": "/srv/app/readonly-dbs",
       "mode": "readonly"
     }
   ],
@@ -207,7 +200,7 @@ Requirements:
 
 - Operators should use an OS-packaged or otherwise trusted `sqlite3` binary.
 - The SSH login user should not be able to replace `sqlite3.path` or its parent directories.
-- Do not execute `sqlite3` from world-writable directories such as `/tmp`.
+- Operators should not configure `sqlite3.path` to an executable in world-writable directories such as `/tmp`; the driver validates command construction but does not inspect remote directory ownership.
 - If an optional helper backend is used, helper path/hash verification rules apply to that backend only.
 
 If legacy `helper.autoUpload` is implemented, integrity verification is mandatory for helper mode:
@@ -234,7 +227,8 @@ Requirements:
 
 Trust boundary:
 
-- Read/write mode is normal SQLite access through the remote `sqlite3` CLI. It intentionally allows users and desktop tools to run their own SQL scripts, including DDL, PRAGMAs, transactions, and maintenance commands that SQLite accepts.
+- Read/write mode is normal SQLite access through the remote `sqlite3` CLI. It intentionally allows users and desktop tools to run their own SQL statements, including DDL, PRAGMAs, transactions, `ATTACH`, `VACUUM`, and maintenance commands that SQLite accepts.
+- The current CLI implementation rejects multiple SQL statements in one JDBC call until batch/script result and update-count semantics are explicitly implemented and tested.
 - The driver is not a SQL firewall. It prevents shell injection, keeps SQL off the SSH command line, and must clean up sqlite3 promptly when JDBC loses the connection.
 - Production deployments should have a SQLite-consistent backup and restore procedure before using `readonly=false` against important live databases.
 - Write-release verification should include passing disposable backup/restore rehearsal evidence from `./gradlew verifyWriteReleaseBackupRestore` or `./gradlew verifyRelease -PverifyWriteRelease=true`.
@@ -249,21 +243,35 @@ Requirements:
 
 - Open SQLite with read-only flags equivalent to `SQLITE_OPEN_READONLY`.
 - Set `PRAGMA query_only=ON` after opening where supported.
-- Install a SQLite authorizer only when a helper/direct SQLite backend exists; CLI mode should use read-only open options, `PRAGMA query_only=ON`, and pre-execution rejection where detectable.
-- Reject write operations before execution where detectable.
-- Reject write operations before execution where detectable.
-- User SQL that SQLite classifies as read-only but has connection-local effects may still be handled by SQLite; `readonly=true` is best-effort through `-readonly`, `PRAGMA query_only=ON`, and JDBC write-path rejection.
+- Install a SQLite authorizer only when a helper/direct SQLite backend exists; CLI mode uses `-readonly`, `PRAGMA query_only=ON`, and JDBC write-path rejection.
+- Reject JDBC write-path operations before execution where detectable. Do not add broad SQL text scanning that would turn CLI mode into a SQL firewall.
+- User SQL routed through query paths that SQLite classifies as read-only but has connection-local effects may still be handled by SQLite; `readonly=true` is best-effort through `-readonly`, `PRAGMA query_only=ON`, and JDBC write-path rejection.
 - Set `PRAGMA temp_store=MEMORY` for readonly sessions where practical, or configure a path-authorized temp directory with bounded memory/disk limits.
 - Readonly sessions must not write temp files outside SQLite internals needed for read-only query execution and authorized temp policy.
 - Treat readonly violations as statement errors, not connection-fatal errors.
 
 `immutable=1` must not be used for live databases. It is only appropriate for static snapshots because it can ignore external changes and locking.
 
+## Lock Safety
+
+Lock safety means preserving SQLite's native local locking by running `sqlite3` on the remote host and ensuring the driver does not leave a process holding locks after JDBC loses the connection.
+
+Requirements:
+
+- Do not use SFTP or file-copy access for live database reads or writes.
+- Start the remote `sqlite3` process over SSH and send SQL on stdin.
+- Configure SQLite busy handling before user statements run.
+- On timeout, EOF, oversized buffered result, parse failure, broken protocol, or broken SSH connection, mark the connection broken and abort the underlying `sqlite3` process or SSH exec channel promptly.
+- On normal close, close stdin/EOF first, wait briefly, then force-close if `sqlite3` does not exit.
+- Surface busy/locked errors as lock contention where possible.
+- CLI mode buffers results; enforce `cli.maxBufferedResultBytes` and do not describe `fetchSize` as true network streaming.
+- Lock safety is not a SQL firewall. Read/write mode may execute destructive SQL; safety here is about process cleanup, accurate error reporting, and preserving SQLite's own locking behavior.
+
 ## SQLite Extension Loading And ATTACH
 
-The backend must keep extension loading unavailable. In CLI mode, the driver must not send `.load` and must reject user-supplied dot commands that could load extensions.
+The backend must keep extension loading unavailable. In CLI mode, the driver must not send `.load` and currently rejects all user-supplied dot commands before they reach `sqlite3`.
 
-Helper/direct SQLite backends may use `sqlite3_set_authorizer` or equivalent controls for stronger policy enforcement. Canonical CLI mode does not implement a SQL firewall and intentionally allows normal sqlite3 scripting in read/write mode.
+Helper/direct SQLite backends may use `sqlite3_set_authorizer` or equivalent controls for stronger policy enforcement. Canonical CLI mode does not implement a SQL firewall and intentionally allows normal SQLite statements in read/write mode.
 
 Policy backends can deny:
 
@@ -274,7 +282,7 @@ Policy backends can deny:
 - `foreign_keys` changes inside write workflows unless explicitly configured.
 - Writes while `readonly=true`.
 
-Authorizer implementation applies only to helper/direct SQLite backends. The CLI backend must honestly document weaker enforcement and test the controls it does implement: read-only open behavior where supported, `PRAGMA query_only=ON`, dot-command rejection, write-statement rejection where detectable, read/write execution when `readonly=false`, and prompt sqlite3 process cleanup when the connection breaks.
+Authorizer implementation applies only to helper/direct SQLite backends. The CLI backend must honestly document weaker enforcement and test the controls it does implement: read-only open behavior where supported, `PRAGMA query_only=ON`, dot-command rejection, JDBC write-path rejection, read/write execution when `readonly=false`, and prompt sqlite3 process cleanup when the connection breaks.
 
 ### SQL Authorizer Matrix
 
@@ -296,7 +304,7 @@ This matrix applies only to optional helper/direct SQLite policy backends. It is
 
 For tool-generated edits, the driver/helper must quote identifiers, bind values, include original key values in predicates, require update count exactly `1`, and fail or rollback when update count is `0` or greater than `1`.
 
-If `ATTACH` is supported, attached database paths must go through the same canonicalization and allowlist authorization as the primary `db.path`.
+In a helper/direct policy backend that supports `ATTACH`, attached database paths must go through the same canonicalization and allowlist authorization as the primary `db.path`.
 
 ## Pooling Security
 
@@ -354,4 +362,4 @@ Recommended production defaults:
 | Extension loading | Disabled |
 | Helper auto-upload | Legacy/helper mode only |
 | SQL/parameter logging | Redacted/off |
-| Executable from `/tmp` | Rejected |
+| Executable from `/tmp` | Operator should not configure; driver validates command syntax but does not inspect remote ownership |

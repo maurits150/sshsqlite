@@ -30,6 +30,15 @@ class LocalProcessTransportTest {
     }
 
     @Test
+    void helperStderrDoesNotCorruptFramedStdout() throws Exception {
+        try (LocalProcessTransport transport = LocalProcessTransport.start(javaCommand("stderrDuringStartup"), config())) {
+            assertEquals("3.fixture", transport.protocol().sqliteVersion());
+            assertTrue(transport.diagnostics().contains("startup diagnostic"));
+            assertEquals("pong", transport.protocol().ping().path("op").asText());
+        }
+    }
+
+    @Test
     void startupFailureIncludesBoundedStderrDiagnostics() {
         IOException error = assertThrows(IOException.class,
                 () -> LocalProcessTransport.start(javaCommand("fail"), config()));

@@ -69,7 +69,7 @@ Unsupported method policy:
 - Method called on closed object: `SQLException`, SQLState `08003` for closed connection or `HY010` for invalid object state.
 - Invalid argument or invalid parameter index: `SQLException`, SQLState `HY000` or a more specific documented state.
 - Invalid cursor position: `SQLException`, SQLState `HY010`.
-- Broken SSH/helper transport: `SQLNonTransientConnectionException`, SQLState `08006`.
+- Broken SSH/sqlite3 CLI transport: `SQLNonTransientConnectionException`, SQLState `08006`.
 - Timeout: `SQLTimeoutException`, SQLState `HYT00`.
 - Client info failure: `SQLClientInfoException`.
 
@@ -95,7 +95,7 @@ Close methods are idempotent.
 | `ResultSetMetaData` | Metadata remains usable if already materialized | Throw only if metadata was never materialized |
 | `DatabaseMetaData` | Wrapper methods may remain usable | Methods requiring live connection throw `SQLException` SQLState `08003` |
 
-Closing a `Connection` closes all child statements and result sets. Closing a `Statement` closes its result set. Closing a streaming `ResultSet` must send `closeCursor` or otherwise finalize the remote SQLite statement promptly.
+Closing a `Connection` closes all child statements and result sets. Closing a `Statement` closes its result set. Closing a cursor-backed `ResultSet` must send `closeCursor` or otherwise finalize the remote SQLite statement promptly. The driver may buffer batches internally, but must not claim true JDBC/network streaming unless that behavior is implemented and tested.
 
 ## Driver Contract
 
@@ -117,15 +117,15 @@ State defaults:
 | State | Default | Behavior |
 | --- | --- | --- |
 | `autoCommit` | `true` | JDBC transaction rules in `jdbc-sqlite-semantics.md` |
-| `readOnly` | Open option | Physical capability; read-only opens cannot become write-capable |
-| `catalog` | `null` | SQLite has no JDBC catalog in MVP |
-| `schema` | `main` | Maps to SQLite database name |
+| `readOnly` | `readonly` connection property, default `false` | Physical capability; read-only opens cannot become write-capable |
+| `catalog` | `null` | SQLite has no JDBC catalog; stored as local advisory state and ignored by metadata calls unless explicitly documented otherwise |
+| `schema` | `main` | Stored as local advisory state; metadata methods use their schema parameters to map SQLite database names such as `main` and `temp` |
 | `transactionIsolation` | `TRANSACTION_SERIALIZABLE` or documented SQLite equivalent | Other levels rejected unless explicitly supported |
 | `holdability` | `CLOSE_CURSORS_AT_COMMIT` | `HOLD_CURSORS_OVER_COMMIT` unsupported |
 | `networkTimeout` | `0` or configured transport timeout | See operations timeout properties |
 | `clientInfo` | empty | Stored locally or rejected with `SQLClientInfoException` |
 | `warnings` | none | `getWarnings()` returns `null` until warnings are implemented |
-| `typeMap` | empty | Non-empty maps unsupported |
+| `typeMap` | unsupported until implemented | `getTypeMap()` and `setTypeMap(...)` throw `SQLFeatureNotSupportedException` unless a future release implements an empty/local map contract |
 
 Required methods commonly called by tools:
 
@@ -140,35 +140,35 @@ Required methods commonly called by tools:
 - `nativeSQL(sql)`, returning SQL unchanged unless preprocessing is explicitly requested elsewhere.
 - `setClientInfo()` and `getClientInfo()`.
 - `setNetworkTimeout(executor, ms)` and `getNetworkTimeout()`.
-- `abort(executor)`, which breaks the connection and closes the helper using the provided executor where practical.
+- `abort(executor)`, which marks the physical connection broken and closes the sqlite3 CLI/transport using the provided executor where practical.
 - `abort()` is connection-fatal. Transaction outcome is unknown unless a rollback acknowledgement was received before abort, and pooled physical connections must always be evicted.
 
 Readonly rules:
 
-- `readonly` from connection open is immutable for the physical helper connection.
+- `readonly` from connection open is immutable for the physical sqlite3 CLI connection.
 - `setReadOnly(false)` on a physically readonly connection throws `SQLException`.
-- `setReadOnly(true)` on a read-write connection must either enable enforced logical readonly through helper authorizer/`PRAGMA query_only=ON` for that logical connection, or throw `SQLException` explaining that readonly must be chosen at connect time.
+- `setReadOnly(true)` on a read-write connection must either enable enforced logical readonly through connection-level protections such as `PRAGMA query_only=ON`, or throw `SQLException` explaining that readonly must be chosen at connect time.
 - `isReadOnly()` reports effective enforcement, not advisory intent.
 - Changing read-only state during an active transaction throws `SQLException`.
 
 Schema/catalog rules:
 
-- SQLite database names such as `main`, `temp`, and authorized attached names map to JDBC schema.
-- Catalog is `null` in MVP.
-- `setSchema("main")` and `setSchema("temp")` are accepted when available.
-- Unknown schemas throw `SQLException` or are rejected by metadata calls according to the support table.
-- Metadata catalog parameters are ignored only where JDBC permits and docs state it.
+- SQLite database names such as `main`, `temp`, and authorized attached names map to JDBC schema in metadata result sets and schema parameters.
+- Catalog is `null`; non-null metadata catalog parameters return empty metadata result sets where JDBC permits.
+- `setSchema(...)` is local advisory state until default-schema query dispatch is implemented and tested.
+- Unknown schemas passed to metadata calls return empty metadata result sets or surface the first useful sqlite3 error according to the specific metadata method.
+- Metadata catalog parameters are ignored only where JDBC permits and docs state it; otherwise non-null catalog filters return empty results.
 
 ## Statement Contract
 
 Required behavior:
 
-- `execute()` and `executeQuery()` maintain JDBC result state for production read-only MVP. `executeUpdate()` and `executeLargeUpdate()` throw `SQLFeatureNotSupportedException` in production read-only MVP and maintain JDBC update-count state only in the write-capable release.
+- `execute()` and `executeQuery()` maintain JDBC result state. `executeUpdate()` and `executeLargeUpdate()` execute non-row-returning SQL when `readonly=false`, reject row-returning SQL, and maintain JDBC update-count state.
 - `getResultSet()` returns the current result set or `null`.
 - `getUpdateCount()` returns current update count or `-1`.
 - `getLargeUpdateCount()` mirrors update count as `long`.
 - `getMoreResults()` returns `false` for MVP and clears current result state according to JDBC rules.
-- Generated-key overloads accepting `RETURN_GENERATED_KEYS` or `NO_GENERATED_KEYS` execute writes normally. `getGeneratedKeys()` returns a one-column result set containing SQLite `last_insert_rowid()` when generated keys were requested and the helper returned it; column-index and column-name overloads remain `SQLFeatureNotSupportedException`.
+- Generated-key overloads accepting `RETURN_GENERATED_KEYS` or `NO_GENERATED_KEYS` execute writes normally. `getGeneratedKeys()` returns a one-column result set containing SQLite `last_insert_rowid()` when generated keys were requested and the backend returned it; column-index and column-name overloads remain `SQLFeatureNotSupportedException`.
 - Batch methods throw `SQLFeatureNotSupportedException` until implemented. `executeBatch()` must never partially execute in MVP.
 - `closeOnCompletion()` and `isCloseOnCompletion()` maintain local state and close the statement after result exhaustion when enabled.
 - `setPoolable()` and `isPoolable()` are advisory local state unless disabled by support table.
@@ -188,11 +188,11 @@ Warning methods return `null` and clear no state until warning production is imp
 
 ## PreparedStatement Contract
 
-PreparedStatement is a post-read-only milestone. For production read-only MVP, `Connection.prepareStatement(...)` may throw `SQLFeatureNotSupportedException` if PreparedStatement support is not implemented yet. Once the PreparedStatement milestone starts, this contract applies.
+PreparedStatement is implemented for indexed parameters and normal parameterless execution methods. Advanced result metadata and parameter metadata remain conservative or unsupported as documented below.
 
 Standard JDBC setters bind by SQLite parameter index for all placeholder forms: `?`, `?NNN`, `:name`, `@name`, and `$name`.
 
-Sparse `?NNN` placeholder indexes are rejected for MVP unless explicitly added to the support matrix and tested. The driver/helper must never rewrite SQL to normalize parameters.
+Sparse `?NNN` placeholder indexes are rejected unless explicitly added to the support matrix and tested. The driver/backend must never rewrite SQL to normalize parameters.
 
 Required behavior:
 
@@ -286,27 +286,27 @@ Minimum metadata result-set methods:
 
 Capability methods should return conservative constants:
 
-- `supportsTransactions()` false for the production read-only MVP because manual transaction methods are not exposed; true only in the write-capable release that implements `setAutoCommit`, `commit`, and `rollback`.
+- `supportsTransactions()` returns `true` for write-capable connections that implement `setAutoCommit`, `commit`, and `rollback`, and `false` for physical readonly connections.
 - `supportsResultSetType(TYPE_FORWARD_ONLY)` true; other types false.
 - `supportsResultSetConcurrency(TYPE_FORWARD_ONLY, CONCUR_READ_ONLY)` true; writable concurrency false.
 - `supportsMultipleResultSets()` false.
 - `supportsMultipleOpenResults()` false for MVP.
 - `supportsBatchUpdates()` false.
-- `supportsGetGeneratedKeys()` false for MVP.
+- `supportsGetGeneratedKeys()` returns `true` when generated-key result sets are implemented for `RETURN_GENERATED_KEYS`.
 - `supportsSavepoints()` false until implemented.
 - `supportsNamedParameters()` false for standard JDBC unless a named-parameter extension is exposed outside JDBC.
 - `supportsStoredProcedures()` false.
 - `getIdentifierQuoteString()` returns `"`.
 - `getSearchStringEscape()` returns `\` unless another escape is implemented.
 
-Exact result-set column layouts for metadata methods must match the JDBC specification even when values are `null`, empty, unknown, or conservative. This is required for DataGrip and DBeaver compatibility and is tracked in `docs/jdbc-metadata-resultsets.md`.
+Exact result-set column layouts for metadata methods must match the JDBC specification even when values are `null`, empty, unknown, or conservative. This is required for desktop-tool compatibility and is tracked in `docs/jdbc-metadata-resultsets.md`.
 
 Table editing metadata:
 
 - Expose primary keys from `PRAGMA table_xinfo`, `PRAGMA index_list`, and `PRAGMA index_info` where possible.
 - Detect `INTEGER PRIMARY KEY` rowid aliases and autoincrement behavior.
 - Default result and table metadata to non-writable unless safe edit identity is proven.
-- Mark editable only for tables with an explicit `INTEGER PRIMARY KEY` rowid alias or complete non-null primary-key metadata. Rowid-only editing remains unsupported unless pinned DataGrip/DBeaver evidence proves safe exposed `_rowid_` identity handling.
+- Mark editable only for tables with an explicit `INTEGER PRIMARY KEY` rowid alias or complete non-null primary-key metadata. Rowid-only editing remains unsupported unless pinned desktop-tool evidence proves safe exposed `_rowid_` identity handling.
 - Treat views, virtual tables, FTS tables, generated/hidden columns, readonly connections, and `WITHOUT ROWID` tables without complete primary-key metadata conservatively as non-editable.
 - Internal `sqlite_%` tables are hidden by default unless metadata options request internal objects.
 - Rowid identity may be used by tool-generated edit SQL only when table metadata and pinned desktop-tool evidence prove it is safe.
@@ -321,7 +321,7 @@ Required tests:
 - Closed-object invocation test for every method to verify documented closed-state behavior.
 - Unsupported feature test asserting `SQLFeatureNotSupportedException`, not `UnsupportedOperationException`.
 - Java baseline test on the supported runtime and compile target.
-- Tool trace test capturing unexpected JDBC method calls from DataGrip and DBeaver and updating support tables when needed.
+- Tool trace test capturing unexpected JDBC method calls from documented/tested desktop tools and updating support tables when needed.
 - Generated method-support matrix freshness test for `docs/jdbc-method-support.generated.md`.
 
 The implementation is not production-ready until these tests pass, `docs/jdbc-method-support.generated.md` exists, and the support tables match observed tool behavior.

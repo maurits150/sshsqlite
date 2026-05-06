@@ -8,7 +8,7 @@ This document defines the required matrix format and MVP classifications. The ex
 
 ## Required Generated Artifact
 
-`docs/jdbc-method-support.generated.md` must be generated from the exact compile target:
+`docs/jdbc-method-support.generated.md` must be generated from the configured Java 11-compatible build:
 
 ```text
 Java runtime: Java 11+
@@ -22,7 +22,7 @@ Generation requirements:
 - Include overload signatures, not only method names.
 - Include default methods from the target Java release.
 - Include methods inherited through `Wrapper`.
-- Fail generation if the compile target JDK differs from the documented baseline.
+- Fail generation if the runtime cannot cover the documented Java 11 JDBC method set.
 - Fail CI if any row has missing status, exception policy, phase, or test owner.
 
 Required columns:
@@ -58,8 +58,8 @@ Use these defaults when generating the first matrix.
 | --- | --- |
 | `Driver` | URL matching, connection creation, version, property info supported; JDBC compliance false |
 | `Connection` | Core lifecycle, statements, transactions, metadata, validation, readonly, schema, warnings, network timeout documented; advanced object factories unsupported |
-| `Statement` | Read-only `execute()`/`executeQuery()` and result state supported; update execution deferred to write-capable release; batches/generated keys/updatable results unsupported |
-| `PreparedStatement` | Unsupported for production read-only MVP unless implemented; indexed setters and execution become supported in the PreparedStatement milestone; stream/object factory setters remain unsupported until implemented |
+| `Statement` | `execute()`/`executeQuery()`/update execution and result state supported for normal SQLite read/write usage when `readonly=false`; batches and updatable results unsupported |
+| `PreparedStatement` | Indexed scalar setters and fixed-SQL execution supported; inherited Statement SQL overloads invalid; stream/object factory setters remain unsupported until implemented |
 | `ResultSet` | Forward-only read-only getters supported; scrolling/updating unsupported |
 | `ResultSetMetaData` | Conservative metadata supported for all returned result sets |
 | `DatabaseMetaData` | Conservative constants or correctly shaped empty result sets preferred over throwing |
@@ -74,6 +74,6 @@ Before MVP release:
 - Every row has a non-empty MVP status.
 - Every `unsupported-feature` row maps to `SQLFeatureNotSupportedException` when the signature permits `SQLException`.
 - Every public JDBC method is covered by reflection tests proving no `AbstractMethodError`, `NoSuchMethodError`, or accidental `UnsupportedOperationException`.
-- DataGrip/DBeaver trace logs are checked against the matrix; any called method must be `supported`, `conservative-constant`, `local-advisory-state`, `empty-metadata-result`, or `populated-metadata-result` unless the tool workflow is explicitly unsupported.
+- DBeaver trace logs are checked against the matrix; any called method must be `supported`, `conservative-constant`, `local-advisory-state`, `empty-metadata-result`, or `populated-metadata-result` unless the tool workflow is explicitly unsupported.
 
 If the generated matrix is absent or stale, release is blocked.

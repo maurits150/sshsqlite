@@ -19,9 +19,9 @@ Most people should just use the prebuilt jar in this repo:
 dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
 ```
 
-Add that jar to your database tool's custom JDBC driver libraries.
+Add that jar to DBeaver's custom JDBC driver libraries.
 
-The driver jar is compiled for Java 11 (`--release 11`) so it works in desktop database tools that still run on a Java 11 runtime.
+The driver jar is compiled for Java 11 (`--release 11`) so it works with DBeaver runtimes that still use Java 11.
 
 ## Server Requirements
 
@@ -48,10 +48,12 @@ Host-key verification uses the normal SSH known-hosts file by default: `~/.ssh/k
 
 ## JDBC URL
 
-Your SFTP path:
+If the remote database file is:
 
 ```text
-sftp://alice@db.example.org/srv/app/app.db
+Host: db.example.org
+User: alice
+Path: /srv/app/app.db
 ```
 
 becomes this JDBC URL:
@@ -134,7 +136,7 @@ ssh alice@db.example.org '/usr/bin/sqlite3 --version'
 - The driver requires Java 11 or newer.
 - The remote sqlite3 CLI path defaults to `/usr/bin/sqlite3` and uses CSV output mode for compatibility with SQLite 3.27.2 and newer.
 - Normal use does not require installing a custom helper binary.
-- Production release verification requires signed artifacts and real DBeaver/DataGrip evidence; development checks can use the documented Gradle bypass properties.
+- Production release verification requires signed artifacts and real DBeaver evidence; development checks can use the documented Gradle bypass properties.
 
 ## License
 

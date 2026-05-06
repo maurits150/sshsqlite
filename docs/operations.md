@@ -1,5 +1,7 @@
 # Operations
 
+SSHSQLite is still experimental and not production safe. This document describes the current CLI-over-SSH operating model and release checks; it is not a production readiness claim.
+
 ## JDBC URL Grammar
 
 Basic forms:
@@ -45,12 +47,12 @@ Core properties:
 | --- | --- | --- | --- |
 | `ssh.host` | yes | URL host | Remote SSH host |
 | `ssh.port` | no | `22` | Remote SSH port |
-| `ssh.user` | yes | URL user or local user | SSH username |
+| `ssh.user` | no | URL user or local user | SSH username |
 | `ssh.knownHosts` | no | standard user file | OpenSSH-compatible known hosts |
 | `ssh.privateKey` | no | first existing `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, `id_dsa`, or `identity` | Path to private key, not key contents |
 | `ssh.privateKeyPassphrase` | no | none | Connection property only, never URL; passphrase for encrypted `ssh.privateKey` |
 | `ssh.password` | no | none | Connection property only, never URL |
-| `password` | no | none | Desktop-tool alias for `ssh.password`; accepted from DBeaver/DataGrip credential fields |
+| `password` | no | none | Desktop-tool alias for `ssh.password`; accepted from DBeaver credential fields |
 | `user`, `username`, `UID` | no | URL user or local user | Desktop-tool aliases for `ssh.user` |
 | `pass`, `PWD` | no | none | Desktop-tool aliases for `ssh.password` |
 | `privateKey`, `privateKeyFile`, `keyFile`, `identityFile`, `sshKey` | no | none | Desktop-tool aliases for `ssh.privateKey` |
@@ -61,7 +63,7 @@ Core properties:
 | `ssh.agent` | no | `false` | SSH agent auth is disabled in the self-contained driver; use `ssh.privateKey` or `ssh.password` |
 | `ssh.connectTimeoutMs` | no | `10000` | TCP/SSH connect timeout |
 | `ssh.keepAliveIntervalMs` | no | `30000` | SSH keepalive interval |
-| `db.path` | yes | URL path | Remote database path |
+| `db.path` | no | URL path | Remote database path; required unless present in the URL |
 | `readonly` | no | `false` | Normal read/write mode; set `true` for read-only inspection |
 | `writeBackupAcknowledged` | production safety only | `false` | Optional operator confirmation for hardened production write policies; not required for basic read/write CLI setup |
 | `adminSql` | no | ignored in CLI mode | Reserved for optional policy/helper backends |
@@ -69,7 +71,7 @@ Core properties:
 | `transactionMode` | no | `deferred` | `deferred`, `immediate`, or `exclusive` for manual transactions |
 | `busyTimeoutMs` | no | `1000` | SQLite busy timeout |
 | `queryTimeoutMs` | no | `30000` | Default statement timeout |
-| `maxRows` | no | tool/driver default | Safety cap for unbounded queries |
+| `maxRows` | no | statement default | Accepted for compatibility; current query limits come from JDBC statement settings such as `Statement.setMaxRows()` |
 | `fetchSize` | no | `200` | Advisory row batch size |
 | `sqlite3.path` | no | `/usr/bin/sqlite3` | Remote sqlite3 executable |
 | `sqlite3.startupTimeoutMs` | no | `10000` | CLI startup and validation timeout |
@@ -84,9 +86,9 @@ Core properties:
 | `pool.idleTimeoutMs` | no | `300000` | Idle eviction timeout |
 | `pool.validationTimeoutMs` | no | `5000` | Ping timeout before reusing idle connection |
 | `pool.maxLifetimeMs` | no | `1800000` | Maximum physical connection age |
-| `param.dotCommands` | no | `false` | Parse SQLite shell `.param` lines before SQL |
-| `log.level` | no | `INFO` | Redacted logging by default |
-| `trace.protocol` | no | `false` | Redacted protocol tracing only |
+| `param.dotCommands` | reserved | `false` | Accepted property name; arbitrary user dot-command preprocessing is not implemented in CLI mode |
+| `log.level` | reserved | `INFO` | Accepted property name for future redacted logging controls |
+| `trace.protocol` | reserved | `false` | Accepted property name for future redacted protocol tracing controls |
 
 Security-sensitive values must be redacted from `toString()`, logs, exceptions, and diagnostics.
 
@@ -136,7 +138,7 @@ Each release must publish:
 - SBOM or dependency inventory for release artifacts.
 - Pinned Java SSH library versions used by the release.
 
-The driver must refuse CLI startup when:
+The driver must fail CLI startup when:
 
 - `sqlite3.path` cannot be executed.
 - The selected CLI output mode is unsupported.
@@ -161,13 +163,13 @@ sha256sum -c sshsqlite_SHA256SUMS
 cosign verify-attestation --type slsaprovenance --certificate-identity <release-identity> --certificate-oidc-issuer <issuer> <artifact-ref>
 ```
 
-`verifyRelease` consumes existing files under `build/distributions`; run `packageRelease` first to produce a candidate, then add signed checksum and provenance/attestation evidence before production verification. Unsigned local development candidates may be checked with `./gradlew verifyRelease -PallowUnsignedRelease=true`, but production verification fails closed without signed manifest and provenance evidence. Optional local signing hooks can be supplied with `-PcosignVerifyManifestCommand=...`, `-PgpgVerifyManifestCommand=...`, `-PcosignVerifyProvenanceCommand=...`, or `-PgpgVerifyProvenanceCommand=...`; hooks are not run unless configured.
+`verifyRelease` consumes existing files under `build/distributions`; run `packageRelease` first to produce a candidate, then add signed checksum and provenance/attestation evidence before production verification. Unsigned local development candidates without desktop-tool evidence may be checked with `./gradlew verifyRelease -PallowUnsignedRelease=true -PallowMissingToolEvidence=true`, but production verification fails closed without signed manifest, provenance evidence, and valid tool evidence. Optional local signing hooks can be supplied with `-PcosignVerifyManifestCommand=...`, `-PgpgVerifyManifestCommand=...`, `-PcosignVerifyProvenanceCommand=...`, or `-PgpgVerifyProvenanceCommand=...`; hooks are not run unless configured.
 
 Release notes must include a compatibility matrix:
 
 | Driver version | CLI mode | Tested sqlite3 versions | Supported server targets | Notes |
 | --- | --- | --- | --- | --- |
-| `0.1.x` | JSON or separator mode | documented per release | SSH server with sqlite3 CLI | MVP CLI backend; optional helper is not required |
+| `0.1.x` | CSV with headers and explicit null sentinel | documented per release | SSH server with sqlite3 CLI | MVP CLI backend; optional helper is not required |
 
 Current CLI portability limits:
 
@@ -182,10 +184,16 @@ This runbook is for the production CLI backend. It supports read-only and read/w
 Release artifact preparation:
 
 1. Build a local candidate with `./gradlew packageRelease`, or download the published candidate artifacts from the trusted release location.
-2. Confirm the distribution includes one self-contained driver jar, `sshsqlite_SHA256SUMS`, `sshsqlite-release-metadata.json`, dependency inventories, signed checksum evidence, and signed provenance or attestation.
+2. Confirm `build/distributions` includes one self-contained driver jar, `sshsqlite_SHA256SUMS`, `sshsqlite-release-metadata.json`, dependency inventories, signed checksum evidence, and signed provenance or attestation.
 3. Verify production release evidence with `./gradlew verifyRelease` against existing `build/distributions` artifacts. Run `./gradlew packageRelease` first only when producing a new mutable candidate; `verifyRelease` itself must not build mutable artifacts.
 4. Do not use `-PallowUnsignedRelease=true` or `-PallowMissingToolEvidence=true` for production. Those flags are development/preview bypasses only.
 5. If release verification depends on external signing tooling, configure hooks with `-PcosignVerifyManifestCommand=...`, `-PgpgVerifyManifestCommand=...`, `-PcosignVerifyProvenanceCommand=...`, or `-PgpgVerifyProvenanceCommand=...`.
+
+Repository distribution workflow:
+
+1. `./build.sh` runs `./gradlew packageRelease`, then copies the self-contained driver jar and `sshsqlite_SHA256SUMS` into `dist/` for desktop-tool users.
+2. The current GitHub Action runs `./build.sh` on Java 11 and uploads `dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar` plus `dist/sshsqlite_SHA256SUMS` as the `sshsqlite-jdbc-driver` artifact.
+3. Full release metadata and dependency inventories remain under `build/distributions` unless the release process explicitly publishes them from that directory.
 
 Server install steps:
 
@@ -197,12 +205,19 @@ Server install steps:
 
 Client configuration steps:
 
-1. Configure the driver jar in the Java application, DataGrip, or DBeaver.
+1. Configure the driver jar in DBeaver or another Java application. DBeaver is the only documented desktop tool for now.
 2. Use a JDBC URL such as `jdbc:sshsqlite://sshsqlite@example.com:22/srv/app/data.db` for normal read/write access, or add `readonly=true` for a read-only connection.
 3. Supply `ssh.knownHosts`, one SSH authentication method, `sqlite3.path=/usr/bin/sqlite3`, and the intended `readonly` value as connection properties.
 4. Keep passwords and private key passphrases in application or desktop-tool credential storage. Never put them in the URL.
 5. Confirm desktop tools use property fields for `sqlite3.path` and SSH settings, and capture diagnostics for the release evidence bundle.
 6. Run the release smoke checklist in `docs/release-smoke.md` before declaring the installation ready for read-only use.
+
+DBeaver setup details:
+
+1. Add `dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar` as a custom driver library.
+2. Set the driver class to `org.sshsqlite.jdbc.SshSqliteDriver`.
+3. Use a URL template such as `jdbc:sshsqlite://{host}:{port}/{database}` with default port `22`, or paste the full JDBC URL.
+4. Put SSH credentials, `ssh.knownHosts`, `sqlite3.path`, and `readonly` in DBeaver driver properties or credential fields, not in the URL.
 
 ### SQLite CLI Verification Runbook
 
@@ -255,8 +270,8 @@ Production defaults should be conservative:
 | `protocol.pingTimeoutMs` | `5000` |
 | `stderr.maxBufferedBytes` | `65536` |
 | `maxFrameBytes` | `1048576` |
+| `cli.maxBufferedResultBytes` | `16777216` |
 | `fetchSize` | `200` |
-| `maxBatchRows` | `500` |
 | `trace.protocol` | `false` |
 | `pool.enabled` | `false` |
 | `pool.maxSize` | `5` |
@@ -271,7 +286,7 @@ busyTimeoutMs=1000
 queryTimeoutMs=30000
 ```
 
-Production deployments should require a SQLite-consistent backup and restore procedure before important live write use. A hardened production profile may require `writeBackupAcknowledged=true`, but normal DBeaver/DataGrip read/write setup should work with `readonly=false` and no helper properties.
+Production deployments should require a SQLite-consistent backup and restore procedure before important live write use. A hardened production profile may require `writeBackupAcknowledged=true`, but normal DBeaver read/write setup should work with `readonly=false` and no helper properties.
 
 ## Observability And Diagnostics
 
@@ -311,7 +326,7 @@ Clear diagnostic messages are required for:
 - Unknown or changed SSH host key.
 - SSH authentication failure.
 - `sqlite3.path` missing or not executable.
-- Unsafe `sqlite3.path` or executable directory permissions.
+- Operator-identified unsafe `sqlite3.path` or executable directory permissions.
 - Unsupported SQLite CLI version or output mode.
 - Database path not accessible to the SSH account.
 - Database file missing or permission denied.
@@ -425,7 +440,7 @@ When metadata browsing fails:
 1. Enable redacted debug logs.
 2. Capture the specific `DatabaseMetaData` method if available.
 3. Add conservative method support or stubs rather than broad fake capabilities.
-4. Test the same workflow in both DataGrip and DBeaver.
+4. Reproduce the workflow in DBeaver first. Other desktop tools should not be documented as supported until tested.
 
 ## Test Matrix
 
@@ -437,19 +452,19 @@ Required verification commands:
 | --- | --- |
 | `./gradlew verify` | Fast local checks: format, unit tests, CLI parser fixtures, JDBC matrix freshness, redaction tests |
 | `./gradlew verifyIntegration` | Disposable SQLite DB, remote `sqlite3` CLI, automated SSH test server, JDBC integration tests |
-| `./gradlew verifyRelease` | Artifact signatures/provenance, CLI compatibility checks, install guidance, read/write CLI release gates; backup/restore rehearsal for production write safety |
+| `./gradlew verifyRelease` | Existing artifact manifests, inventories, signing/provenance evidence, tool evidence, and install guidance; add `-PverifyWriteRelease=true` for disposable backup/restore rehearsal |
 | `./gradlew verifySoak` | Long-running reliability, idle, concurrency, large-result, and fault-injection tests |
-| `./gradlew verifyTools` | Guided DataGrip/DBeaver smoke evidence capture where GUI automation is not available |
+| `./gradlew verifyTools` | Guided DBeaver smoke evidence capture where GUI automation is not available |
 
 Gradle is the canonical Java ecosystem entry point. Optional helper tasks may delegate to non-Java tooling internally, but the CLI backend is canonical.
 
 Release smoke checklist:
 
 - `docs/release-smoke.md` is the operator-facing checklist for fresh install, `sqlite3 --version`, known-host verification, read-only connect, metadata browse, bounded `SELECT`, read-only rejection, and diagnostics bundle capture.
-- `./gradlew generateToolEvidenceTemplate` writes starter DataGrip/DBeaver evidence templates under `build/reports/tool-evidence-template`.
+- `./gradlew generateToolEvidenceTemplate` writes starter DBeaver evidence templates under `build/reports/tool-evidence-template`.
 - `./gradlew verifyTools` validates completed evidence under `tool-evidence/`.
 
-`./gradlew verifyTools` validates a structured evidence bundle for desktop GUI workflows when direct automation is unavailable. The bundle lives at `tool-evidence/workflow.json` with schema `sshsqlite-tool-evidence-v1`. It must contain pinned DataGrip and DBeaver entries with tool name/version/build, driver artifact SHA-256, remote SQLite CLI version, disposable fixture SHA-256, redacted log references, screenshot or exported diagnostics references, pass/fail JSON references, unexpected JDBC method trace references, and the read-only workflow IDs listed below. Referenced evidence files must exist under `tool-evidence/` and be non-empty. Generate a starter checklist with `./gradlew generateToolEvidenceTemplate`.
+`./gradlew verifyTools` validates a structured evidence bundle for desktop GUI workflows when direct automation is unavailable. The bundle lives at `tool-evidence/workflow.json` with schema `sshsqlite-tool-evidence-v1`. It must contain pinned DBeaver entries with tool name/version/build, driver artifact SHA-256, remote SQLite CLI version, disposable fixture SHA-256, redacted log references, screenshot or exported diagnostics references, pass/fail JSON references, unexpected JDBC method trace references, and the read-only workflow IDs listed below. Referenced evidence files must exist under `tool-evidence/` and be non-empty. Generate a starter checklist with `./gradlew generateToolEvidenceTemplate`.
 
 Production `verifyRelease` fails closed without valid tool evidence. Development or preview checks may explicitly bypass missing evidence with `-PallowMissingToolEvidence=true`; this does not validate malformed evidence when a bundle is present.
 
@@ -472,7 +487,7 @@ Minimum production test matrix:
 | Parameters | CLI parameter emulation limits if used; JDBC index binds, named binds, repeated names, safe SQL literal rendering or temporary parameter commands, and optional limited `.param` preprocessing only after implemented and tested |
 | Metadata | tables, columns, indexes, primary keys, foreign keys, schemas |
 | JDBC interface | reflection coverage, closed-object behavior, unsupported methods, wrapper/unwrap |
-| Tools | DataGrip/DBeaver browse/query smoke tests plus write edit smoke tests on disposable databases |
+| Tools | DBeaver browse/query smoke tests plus write edit smoke tests on disposable databases |
 | Operations | `sqlite3` missing, permission denied, version/output-mode mismatch, query timeout, cancel |
 
 Additional release-gate tests:
@@ -486,7 +501,7 @@ Additional release-gate tests:
 | Support bundle | diagnostic bundle contains required versions/hashes/capabilities and excludes secrets |
 | Soak | repeated connect/query/close, long idle validation, `sqlite3` crash recovery, SSH EOF recovery |
 | Large results | bounded memory while fetching batches, early result-set close finalizes remote statement |
-| Desktop tools | pinned DataGrip and DBeaver versions, readonly browse/query plus write edit/commit/rollback on disposable databases |
+| Desktop tools | pinned DBeaver version, readonly browse/query plus write edit/commit/rollback on disposable databases |
 
 Soak pass criteria:
 
@@ -494,14 +509,14 @@ Soak pass criteria:
 - `5` concurrent non-pooled physical read-only connections run bounded query loops for at least `1` hour with no leaked `sqlite3` processes, stuck SSH sessions, or cross-connection state leakage.
 - Future pooling soak: `5` concurrent pooled read connections run metadata and bounded query loops for at least `1` hour with no pool reuse of broken or tainted connections. This is required for the pooling release, not the CLI MVP.
 - One idle connection survives at least `8` hours with CLI validation and SSH keepalive, or fails closed and reconnects cleanly according to documented behavior.
-- Bounded large-result CLI smoke reads more rows than the configured JDBC fetch size and verifies final JVM/`sqlite3` resource cleanup. Current sqlite3 JSON CLI mode materializes statement output before JDBC fetch batches, so this is not evidence of true streaming.
+- Bounded large-result CLI smoke reads more rows than the configured JDBC fetch size and verifies final JVM/`sqlite3` resource cleanup. Current sqlite3 CSV CLI mode buffers statement output before JDBC fetch batches, so this is not evidence of true streaming.
 - `sqlite3` crash, SSH EOF, unparsable output, stdout write timeout, and query timeout without safe interrupt/finalization mark the connection broken. Query timeout with verified interrupt and cleanup may leave the connection reusable only when a backend implements it. Pooled physical connection eviction is required only when pooling exists or is under pooling-release test.
 - Resource growth across the soak must stay within hard ceilings: `0` leaked `sqlite3` processes, `0` unclosed SSH channels after teardown, JVM heap after forced garbage collection no more than `20%` above post-warmup baseline, `sqlite3` RSS no more than `20%` above post-warmup baseline, and open file descriptors no more than `10%` above post-warmup baseline.
 - Every failure during soak must produce a redacted structured event and enough diagnostic context to identify the failed connection/request.
 
 `verifySoak` emits machine-readable JSON with command version, git revision when available, OS/arch, Java version, SQLite CLI version, scenario names, pass/fail status, duration, peak memory, final memory, open file descriptors, `sqlite3` process count, SSH channel count, and failure diagnostics.
 
-### DataGrip And DBeaver Smoke Tests
+### DBeaver Smoke Tests
 
 Run these workflows against each supported desktop-tool version before production CLI release:
 
@@ -523,15 +538,15 @@ Read/write tool workflows must run against disposable copies before enabling aga
 4. Insert workflows are unsupported until generated-key-disabled behavior is proven in both tools, or until generated-key support is implemented and tested.
 5. Trigger a lock/busy condition and verify the tool shows a clear error without breaking a reusable connection when appropriate.
 
-Rowid-only GUI editing is unsupported until pinned DataGrip/DBeaver evidence proves each tool can use a safe exposed `_rowid_` identity. Production GUI editing requires an explicit `INTEGER PRIMARY KEY` or complete non-null primary-key metadata unless that evidence exists.
+Rowid-only GUI editing is unsupported until pinned DBeaver evidence proves the tool can use a safe exposed `_rowid_` identity. Production GUI editing requires an explicit `INTEGER PRIMARY KEY` or complete non-null primary-key metadata unless that evidence exists.
 
 ## Desktop Tool Distribution
 
 The JDBC driver distribution must be desktop-tool ready:
 
-- One self-contained JDBC jar for DataGrip/DBeaver users, with shaded or bundled runtime dependencies except those intentionally provided by the JDK.
+- One self-contained JDBC jar for DBeaver users, with shaded or bundled runtime dependencies except those intentionally provided by the JDK.
 - Published Maven coordinates for Java application users.
-- Driver class documented as `SshSqliteDriver` or the final fully-qualified class name before release.
+- Driver class documented as `org.sshsqlite.jdbc.SshSqliteDriver`.
 - `META-INF/services/java.sql.Driver` included for service loading.
 - Tool-specific setup examples for URL, connection properties, SSH agent/key/password handling, `sqlite3.path`, and redacted diagnostics.
 - Smoke evidence must prove required properties can be supplied through each pinned desktop tool without leaking secrets in URLs or logs.

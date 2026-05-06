@@ -32,22 +32,21 @@ public final class SshSqlitePreparedStatement extends BasePreparedStatement {
     @Override
     public ResultSet executeQuery() throws SQLException {
         checkOpen();
+        clearExecutionState(true);
         currentResultSet = startQuery();
-        updateCount = -1;
         return currentResultSet;
     }
 
     @Override
     public boolean execute() throws SQLException {
         checkOpen();
+        clearExecutionState(true);
         clearGeneratedKeys();
-        if (SshSqliteStatement.returnsRows(sql)) {
+        if (rowProducingStatementCount() > 0) {
             currentResultSet = startQuery();
-            updateCount = -1;
             return true;
         }
         updateCount = executeUpdateInternal();
-        currentResultSet = null;
         return false;
     }
 
@@ -147,7 +146,7 @@ public final class SshSqlitePreparedStatement extends BasePreparedStatement {
     }
     @Override public long executeLargeUpdate() throws SQLException {
         checkOpen();
-        closeCurrentResultSet();
+        clearExecutionState(true);
         clearGeneratedKeys();
         updateCount = executeUpdateInternal();
         return updateCount;
@@ -172,36 +171,53 @@ public final class SshSqlitePreparedStatement extends BasePreparedStatement {
     @Override public void addBatch(String sql) throws SQLException { throw fixedSqlError(); }
 
     private ResultSet startQuery() throws SQLException {
-        if (!SshSqliteStatement.returnsRows(sql)) {
+        int rowProducingStatements = rowProducingStatementCount();
+        if (rowProducingStatements == 0) {
             throw JdbcSupport.invalidArgument("executeQuery requires a statement that returns rows");
+        }
+        if (rowProducingStatements > 1) {
+            throw JdbcSupport.invalidArgument("Multiple row-producing SQL statements are not supported by this JDBC driver");
         }
         validateCompleteParameters();
         closeCurrentResultSet();
         try {
-            connection.ensureTransactionForStatement();
+            connection.ensureTransactionForStatement(sql);
             JsonNode response = connection.protocol().query(sql, orderedParameters(), getMaxRows(), effectiveFetchSize(), queryTimeoutMs());
+            connection.syncExplicitTransactionState(sql);
             return new SshSqliteResultSet(this, response.path("cursorId").asText(), response.path("columns"));
         } catch (Exception e) {
+            connection.recoverFailedExplicitTransactionScript(sql, e);
             throw connection.sqlException(e);
         }
     }
 
     private long executeUpdateInternal() throws SQLException {
         connection.ensureWritesAllowed();
-        if (SshSqliteStatement.returnsRows(sql)) {
+        if (rowProducingStatementCount() > 0) {
             throw JdbcSupport.invalidArgument("executeUpdate requires a statement that does not return rows");
         }
         validateCompleteParameters();
         try {
-            connection.ensureTransactionForStatement();
+            connection.ensureTransactionForStatement(sql);
             JsonNode response = connection.protocol().exec(sql, orderedParameters(), queryTimeoutMs());
+            connection.syncExplicitTransactionState(sql);
             if (returnGeneratedKeys) {
                 generatedKeys = SshSqliteStatement.generatedKeysResultSet(response.path("lastInsertRowid").asLong());
             }
             return response.path("changes").asLong();
         } catch (Exception e) {
+            connection.recoverFailedExplicitTransactionScript(sql, e);
             throw connection.sqlException(e);
         }
+    }
+
+    private void clearExecutionState(boolean closeResultSet) throws SQLException {
+        if (closeResultSet) {
+            closeCurrentResultSet();
+        } else {
+            currentResultSet = null;
+        }
+        updateCount = -1;
     }
 
     int effectiveFetchSize() throws SQLException {
@@ -216,6 +232,16 @@ public final class SshSqlitePreparedStatement extends BasePreparedStatement {
 
     SqlClient protocol() throws SQLException {
         return connection.protocol();
+    }
+
+    private int rowProducingStatementCount() {
+        int count = 0;
+        for (String statement : CliProtocolClient.splitSqlStatements(sql)) {
+            if (SshSqliteStatement.returnsRows(statement)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private void closeCurrentResultSet() throws SQLException {
@@ -310,7 +336,7 @@ public final class SshSqlitePreparedStatement extends BasePreparedStatement {
                 continue;
             }
             if (quote != 0) {
-                if (ch == quote) {
+                if ((quote == '[' && ch == ']') || (quote != '[' && ch == quote)) {
                     if (quote == '\'' && i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
                         i++;
                         continue;
@@ -327,7 +353,7 @@ public final class SshSqlitePreparedStatement extends BasePreparedStatement {
                 blockComment = true;
                 continue;
             }
-            if (ch == '\'' || ch == '"' || ch == '`') {
+            if (ch == '\'' || ch == '"' || ch == '`' || ch == '[') {
                 quote = ch;
                 continue;
             }

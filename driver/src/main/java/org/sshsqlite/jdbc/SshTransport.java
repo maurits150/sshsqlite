@@ -97,12 +97,8 @@ final class SshTransport implements Transport {
             PipedInputStream stderrInput = new PipedInputStream();
             PipedOutputStream stderrSink = new PipedOutputStream(stderrInput);
             BoundedCapture stderr = new BoundedCapture(stderrInput, config.stderrMaxBufferedBytes);
-            if (helperMode) {
-                executor.submit(stderr);
-                channel.setErr(stderrSink);
-            } else {
-                channel.setErr(stdoutSink);
-            }
+            executor.submit(stderr);
+            channel.setErr(stderrSink);
             channel.open().verify(helperMode ? config.helperStartupTimeoutMs : config.sqlite3StartupTimeoutMs);
             ClientSession activeSession = session;
             SqlClient protocol = helperMode

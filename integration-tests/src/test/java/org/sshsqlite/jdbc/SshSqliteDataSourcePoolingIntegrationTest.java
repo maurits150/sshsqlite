@@ -16,6 +16,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -39,6 +40,30 @@ class SshSqliteDataSourcePoolingIntegrationTest {
             try (Connection connection = dataSource.getConnection()) {
                 assertSame(first, connection.unwrap(SshSqliteConnection.class));
                 assertEquals(1, dataSource.physicalConnectionCount());
+            }
+        } finally {
+            dataSource.close();
+        }
+    }
+
+    @Test
+    void pooledStatementsAndMetadataExposeLogicalConnection() throws Exception {
+        Path db = createDatabase("logical.db");
+        SshSqliteDataSource dataSource = dataSource(db, true);
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            assertSame(connection, statement.getConnection());
+            assertSame(connection, connection.getMetaData().getConnection());
+            try (ResultSet tables = connection.getMetaData().getTables(null, null, "typed", null)) {
+                assertNull(tables.getStatement());
+                assertTrue(tables.next());
+            }
+            try (ResultSet columns = connection.getMetaData().getColumns(null, null, "typed", "id")) {
+                assertNull(columns.getStatement());
+                assertTrue(columns.next());
+            }
+            try (ResultSet rs = statement.executeQuery("SELECT id FROM typed ORDER BY id")) {
+                assertSame(statement, rs.getStatement());
+                assertSame(connection, rs.getStatement().getConnection());
             }
         } finally {
             dataSource.close();

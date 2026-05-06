@@ -33,6 +33,128 @@ fun Method.matrixSignature(): String {
     return "${name}($parameters): ${returnType.typeName.replace('$', '.')}"
 }
 
+data class JdbcMatrixClassification(
+    val status: String,
+    val behavior: String,
+    val failurePolicy: String,
+    val phase: String,
+    val testOwner: String,
+)
+
+fun Method.hasParameters(vararg types: Class<*>): Boolean = parameterTypes.contentEquals(types)
+
+fun Method.hasLeadingSqlString(): Boolean = parameterTypes.firstOrNull() == String::class.java
+
+fun unsupportedClassification(phase: String = "current driver") = JdbcMatrixClassification(
+    "unsupported-feature",
+    "Optional JDBC feature is not implemented by this driver.",
+    "Open objects throw `SQLFeatureNotSupportedException` with SQLState `0A000`; closed objects throw `SQLException` with SQLState `08003` for connections or `HY010` for statements/result sets.",
+    phase,
+    "JDBC reflection tests",
+)
+
+fun wrapperClassification() = JdbcMatrixClassification(
+    "supported",
+    "Implements the JDBC `Wrapper` contract for this object and returns/casts this instance when compatible.",
+    "Null or incompatible wrapper targets throw `SQLException` with SQLState `HY000`.",
+    "current driver",
+    "JDBC contract tests",
+)
+
+fun localStateClassification(behavior: String) = JdbcMatrixClassification(
+    "local-advisory-state",
+    behavior,
+    "Closed objects throw the interface-specific closed-state `SQLException`; invalid arguments throw `SQLException` with SQLState `HY000`; unsupported alternate modes throw `SQLFeatureNotSupportedException` with SQLState `0A000`.",
+    "current driver",
+    "JDBC contract tests",
+)
+
+fun supportedClassification(behavior: String, testOwner: String = "JDBC contract/integration tests") = JdbcMatrixClassification(
+    "supported",
+    behavior,
+    "SQLException from local validation or remote sqlite3/protocol failures is propagated with the driver SQLState; closed objects use SQLState `08003` or `HY010`.",
+    "current driver",
+    testOwner,
+)
+
+fun constantClassification(behavior: String) = JdbcMatrixClassification(
+    "conservative-constant",
+    behavior,
+    "Closed objects throw the interface-specific closed-state `SQLException` when the implementation checks object state.",
+    "current driver",
+    "JDBC contract tests",
+)
+
+fun metadataClassification(behavior: String, populated: Boolean = true) = JdbcMatrixClassification(
+    if (populated) "populated-metadata-result" else "empty-metadata-result",
+    behavior,
+    "SQLException from metadata SQL or protocol failures is propagated; closed connections throw SQLState `08003`.",
+    "current driver",
+    "metadata integration tests",
+)
+
+fun classifyJdbcMethod(iface: Class<*>, method: Method): JdbcMatrixClassification {
+    val name = method.name
+    val signature = method.matrixSignature()
+    if (name == "unwrap" || name == "isWrapperFor") return wrapperClassification()
+
+    return when (iface) {
+        java.sql.Driver::class.java -> when (name) {
+            "connect" -> supportedClassification("Accepts `jdbc:sshsqlite:` URLs, opens the SSH/local sqlite3 transport, and returns an `SshSqliteConnection`; returns null for non-matching URLs.", "URL/config tests and integration tests")
+            "acceptsURL" -> supportedClassification("Returns true for non-null URLs starting with `jdbc:sshsqlite:`.", "URL/config tests")
+            "getPropertyInfo" -> constantClassification("Returns an empty `DriverPropertyInfo` array.")
+            "getMajorVersion" -> constantClassification("Returns driver major version `0`.")
+            "getMinorVersion" -> constantClassification("Returns driver minor version `1`.")
+            "jdbcCompliant" -> constantClassification("Returns false.")
+            "getParentLogger" -> unsupportedClassification()
+            else -> unsupportedClassification()
+        }
+        java.sql.Connection::class.java -> when {
+            name in setOf("close", "isClosed", "isValid", "abort") -> supportedClassification("Manages connection lifecycle and defensive cleanup of registered statements and the underlying transport.", "JDBC contract and pooling tests")
+            name in setOf("createStatement", "prepareStatement") && (method.parameterCount == 0 || method.hasParameters(String::class.java) || signature == "prepareStatement(java.lang.String, int): java.sql.PreparedStatement") -> supportedClassification("Creates forward-only statement objects; supported prepared-statement overloads bind indexed values and may request generated keys.", "query/write integration tests")
+            name == "getMetaData" -> supportedClassification("Returns `SshSqliteDatabaseMetaData` backed by sqlite3 metadata queries.", "metadata integration tests")
+            name in setOf("setAutoCommit", "getAutoCommit", "commit", "rollback") && !signature.contains("Savepoint") -> supportedClassification("Implements sqlite3 transaction state for read/write connections; commit/rollback are invalid while `autoCommit=true`.", "transaction integration tests")
+            name in setOf("setReadOnly", "isReadOnly", "nativeSQL", "setCatalog", "getCatalog", "setSchema", "getSchema", "setTransactionIsolation", "getTransactionIsolation", "setHoldability", "getHoldability", "getWarnings", "clearWarnings", "setClientInfo", "getClientInfo", "setNetworkTimeout", "getNetworkTimeout") -> localStateClassification("Stores or returns local advisory JDBC state without rewriting user SQL; read-only mode is fixed by connection configuration.")
+            else -> unsupportedClassification()
+        }
+        java.sql.Statement::class.java -> when {
+            name in setOf("execute", "executeQuery", "executeUpdate", "executeLargeUpdate") && !signature.contains("int[]") && !signature.contains("java.lang.String[]") -> supportedClassification("Executes SQL through remote sqlite3 stdin, preserving SQL text; query/update methods validate whether rows are expected.", "query/write integration tests")
+            name in setOf("getResultSet", "getUpdateCount", "getLargeUpdateCount", "getMoreResults", "getGeneratedKeys") -> supportedClassification("Returns current result state, generated-key result sets, or no-more-results state for the last execution.", "query/write integration tests")
+            name in setOf("close", "cancel", "isClosed", "getConnection", "getWarnings", "clearWarnings") -> supportedClassification("Manages statement lifecycle, warnings, connection access, and best-effort cancellation for remote statements.", "JDBC contract tests")
+            name in setOf("setMaxFieldSize", "getMaxFieldSize", "setMaxRows", "getMaxRows", "setLargeMaxRows", "getLargeMaxRows", "setQueryTimeout", "getQueryTimeout", "setFetchDirection", "getFetchDirection", "setFetchSize", "getFetchSize", "setEscapeProcessing", "setPoolable", "isPoolable", "closeOnCompletion", "isCloseOnCompletion") -> localStateClassification("Stores local JDBC statement options; only forward fetch direction is accepted.")
+            name in setOf("getResultSetConcurrency", "getResultSetType", "getResultSetHoldability") -> constantClassification("Returns forward-only/read-only/close-cursors-at-commit capabilities for real SSHSQLite statements.")
+            else -> unsupportedClassification()
+        }
+        java.sql.PreparedStatement::class.java -> when {
+            name in setOf("execute", "executeQuery", "executeUpdate", "executeLargeUpdate") && method.parameterCount == 0 -> supportedClassification("Executes the fixed prepared SQL with bound positional values through remote sqlite3.", "prepared-statement integration tests")
+            name in setOf("execute", "executeQuery", "executeUpdate", "executeLargeUpdate", "addBatch") && method.hasLeadingSqlString() -> JdbcMatrixClassification("invalid-state-error", "PreparedStatement SQL is fixed at construction; inherited Statement SQL overloads reject supplied SQL.", "Throws `SQLException` with SQLState `HY010`.", "current driver", "prepared-statement integration tests")
+            name in setOf("setNull", "setString", "setInt", "setLong", "setDouble", "setFloat", "setBoolean", "setBytes", "setBigDecimal", "setDate", "setTime", "setTimestamp", "setObject", "clearParameters") -> supportedClassification("Binds supported scalar values as sqlite3 parameters; calendars are accepted but not timezone-adjusted.", "prepared-statement integration tests")
+            name in setOf("getResultSet", "getUpdateCount", "getLargeUpdateCount", "getMoreResults", "getGeneratedKeys", "close") -> supportedClassification("Returns prepared-statement result/update state and generated-key result sets.", "prepared-statement integration tests")
+            name in setOf("getMetaData") -> constantClassification("Returns null because result-set metadata is only known after execution.")
+            name in setOf("getParameterMetaData") -> unsupportedClassification()
+            name in setOf("getConnection", "getWarnings", "clearWarnings", "setMaxFieldSize", "getMaxFieldSize", "setMaxRows", "getMaxRows", "setLargeMaxRows", "getLargeMaxRows", "setQueryTimeout", "getQueryTimeout", "setFetchDirection", "getFetchDirection", "setFetchSize", "getFetchSize", "setEscapeProcessing", "setPoolable", "isPoolable", "closeOnCompletion", "isCloseOnCompletion") -> localStateClassification("Uses the same local advisory state as `Statement`.")
+            else -> unsupportedClassification()
+        }
+        java.sql.ResultSet::class.java -> when {
+            name in setOf("next", "close", "isClosed", "getMetaData", "wasNull", "getStatement", "isBeforeFirst", "isAfterLast", "isFirst", "isLast", "findColumn", "getObject", "getString", "getLong", "getInt", "getDouble", "getBytes", "getBoolean") -> supportedClassification("Supports forward-only remote cursor fetching and basic SQLite value getters by index or label.", "query integration tests")
+            name in setOf("getType", "getConcurrency", "getHoldability", "isClosed") -> constantClassification("Returns conservative forward-only/read-only cursor state where implemented by the base result set.")
+            else -> unsupportedClassification()
+        }
+        java.sql.ResultSetMetaData::class.java -> when {
+            name in setOf("getColumnCount", "getColumnLabel", "getColumnName", "getColumnType", "getColumnTypeName", "getColumnClassName", "isNullable", "getCatalogName", "getSchemaName", "getTableName") -> supportedClassification("Returns column metadata captured from sqlite3 output or metadata queries, including declared SQLite type names.", "metadata integration tests")
+            else -> unsupportedClassification()
+        }
+        java.sql.DatabaseMetaData::class.java -> when {
+            name in setOf("getTables", "getColumns", "getPrimaryKeys", "getIndexInfo", "getImportedKeys", "getSchemas", "getTableTypes", "getTypeInfo") -> metadataClassification("Returns JDBC-shaped metadata result sets populated from SQLite-compatible `sqlite_master` and schema-qualified PRAGMAs.")
+            name in setOf("getCatalogs", "getProcedures", "getProcedureColumns", "getFunctions", "getFunctionColumns", "getUDTs") -> metadataClassification("Returns a correctly shaped empty metadata result set for unsupported SQLite object categories.", populated = false)
+            name in setOf("getURL", "getUserName", "getDatabaseProductVersion", "getDatabaseMajorVersion", "getDatabaseMinorVersion", "getJDBCMajorVersion", "getJDBCMinorVersion", "getSQLStateType", "getIdentifierQuoteString", "getSearchStringEscape", "getSQLKeywords", "getNumericFunctions", "getStringFunctions", "getSystemFunctions", "getTimeDateFunctions", "getExtraNameCharacters", "allProceduresAreCallable", "allTablesAreSelectable", "nullsAreSortedHigh", "nullsAreSortedLow", "nullsAreSortedAtStart", "nullsAreSortedAtEnd", "usesLocalFiles", "usesLocalFilePerTable", "supportsMixedCaseIdentifiers", "storesUpperCaseIdentifiers", "storesLowerCaseIdentifiers", "storesMixedCaseIdentifiers", "supportsMixedCaseQuotedIdentifiers", "storesUpperCaseQuotedIdentifiers", "storesLowerCaseQuotedIdentifiers", "storesMixedCaseQuotedIdentifiers", "supportsLikeEscapeClause", "supportsColumnAliasing", "nullPlusNonNullIsNull", "supportsMultipleResultSets", "supportsMultipleTransactions", "supportsNonNullableColumns", "supportsStoredProcedures", "supportsTransactions", "getDefaultTransactionIsolation", "supportsTransactionIsolationLevel", "supportsDataDefinitionAndDataManipulationTransactions", "supportsDataManipulationTransactionsOnly", "dataDefinitionCausesTransactionCommit", "dataDefinitionIgnoredInTransactions", "getResultSetHoldability", "supportsResultSetType", "supportsResultSetConcurrency", "supportsResultSetHoldability", "supportsBatchUpdates", "supportsMultipleOpenResults", "supportsGetGeneratedKeys", "generatedKeyAlwaysReturned", "supportsSavepoints", "supportsNamedParameters", "supportsStatementPooling", "getRowIdLifetime", "autoCommitFailureClosesAllResultSets", "isReadOnly", "getConnection", "getDriverName", "getDriverVersion", "getDriverMajorVersion", "getDriverMinorVersion", "getDatabaseProductName") -> constantClassification("Returns conservative SQLite/driver capability constants or connection-derived values.")
+            else -> unsupportedClassification()
+        }
+        java.sql.Wrapper::class.java -> wrapperClassification()
+        else -> unsupportedClassification()
+    }
+}
+
 fun generateJdbcMatrix(): String {
     val rows = jdbcInterfaces.flatMap { iface ->
         iface.methods
@@ -48,10 +170,11 @@ fun generateJdbcMatrix(): String {
         appendLine()
         appendLine("Target interfaces: Driver, Connection, Statement, PreparedStatement, ResultSet, ResultSetMetaData, DatabaseMetaData, Wrapper.")
         appendLine()
-        appendLine("| Interface | Method | Behavior | Failure policy | Phase | Test owner |")
-        appendLine("| --- | --- | --- | --- | --- | --- |")
+        appendLine("| Interface | Method | MVP status | Behavior | Failure policy | Phase | Test owner |")
+        appendLine("| --- | --- | --- | --- | --- | --- | --- |")
         rows.forEach { (iface, method) ->
-            appendLine("| `$iface` | `${method.matrixSignature()}` | Unsupported until implemented; must be explicitly updated before feature work claims support. | Throw `SQLFeatureNotSupportedException` or documented JDBC exception; never `AbstractMethodError`. | Phase 0b contract | JDBC reflection tests |")
+            val classification = classifyJdbcMethod(jdbcInterfaces.first { it.simpleName == iface }, method)
+            appendLine("| `$iface` | `${method.matrixSignature()}` | ${classification.status} | ${classification.behavior} | ${classification.failurePolicy} | ${classification.phase} | ${classification.testOwner} |")
         }
     }
 }
@@ -69,6 +192,7 @@ tasks.register("generateJdbcMethodSupport") {
 tasks.register("checkJdbcMethodSupport") {
     group = "verification"
     description = "Checks the committed JDBC method support matrix is fresh and complete for Java 11."
+    mustRunAfter("generateJdbcMethodSupport")
     inputs.file(jdbcMatrixFile)
     outputs.file(jdbcMatrixCheckFile)
     doLast {
@@ -167,7 +291,7 @@ val toolEvidenceWorkflowIds = listOf(
     "verify-readonly-rejections",
     "capture-unexpected-jdbc-methods",
 )
-val toolEvidenceNames = setOf("DataGrip", "DBeaver")
+val toolEvidenceNames = setOf("DBeaver")
 val sha256Regex = Regex("[0-9a-f]{64}")
 
 fun Any?.asJsonObject(path: String): Map<*, *> = this as? Map<*, *> ?: error("$path must be a JSON object")
@@ -217,7 +341,7 @@ fun validateUnexpectedJdbcTrace(file: File, path: String) {
 fun validateToolEvidence(evidenceDir: File, allowMissingToolEvidence: Boolean) {
     if (!evidenceDir.exists()) {
         require(allowMissingToolEvidence) {
-            "Missing ${evidenceDir.path}. Production verification requires DataGrip and DBeaver evidence; pass -PallowMissingToolEvidence=true only for development/preview."
+            "Missing ${evidenceDir.path}. Production verification requires DBeaver evidence; pass -PallowMissingToolEvidence=true only for development/preview."
         }
         return
     }
@@ -234,11 +358,11 @@ fun validateToolEvidence(evidenceDir: File, allowMissingToolEvidence: Boolean) {
         item.asJsonObject("workflow.json.tools[$index]")
     }
     val names = toolEntries.map { it.requiredString("name", "workflow.json.tools[]") }.toSet()
-    require(names == toolEvidenceNames) { "workflow.json.tools must contain exactly DataGrip and DBeaver evidence" }
+    require(names == toolEvidenceNames) { "workflow.json.tools must contain exactly DBeaver evidence" }
     toolEntries.forEachIndexed { index, tool ->
         val path = "workflow.json.tools[$index]"
         val name = tool.requiredString("name", path)
-        require(name in toolEvidenceNames) { "$path.name must be DataGrip or DBeaver" }
+        require(name in toolEvidenceNames) { "$path.name must be DBeaver" }
         tool.requiredString("version", path)
         tool.requiredString("build", path)
         tool.requiredSha256("driverArtifactHash", path)
@@ -290,6 +414,32 @@ fun verifySha256Manifest(distDir: File, manifest: File) {
     }
 }
 
+fun verifyReleaseDistributionContents(distDir: File, projectVersion: String) {
+    require(distDir.isDirectory) { "Missing release distribution directory: ${distDir.path}. Run ./gradlew packageRelease first." }
+    val files = distributionFiles(distDir)
+    val relativePaths = files.map { it.releaseRelativePath(distDir) }
+    val driverJars = files.filter { it.name.matches(Regex("sshsqlite-driver-.*-all\\.jar")) }
+    require(driverJars.size == 1) { "Expected exactly one driver distribution jar, found ${driverJars.size}" }
+    require("sshsqlite-release-metadata.json" in relativePaths) { "Missing release metadata JSON" }
+    require("sshsqlite-gradle-runtime-dependencies.json" in relativePaths) { "Missing Gradle dependency inventory JSON" }
+    files.forEach { file -> require(file.length() > 0) { "Release artifact is empty: ${file.releaseRelativePath(distDir)}" } }
+
+    val manifest = distDir.resolve("sshsqlite_SHA256SUMS")
+    verifySha256Manifest(distDir, manifest)
+    val manifestPaths = manifest.readLines()
+        .filter { it.isNotBlank() }
+        .map { it.split(Regex("\\s+"), limit = 2)[1].trim().removePrefix("*") }
+        .sorted()
+    require(manifestPaths == relativePaths.sorted()) {
+        "SHA-256 manifest entries do not exactly match release artifacts. manifest=$manifestPaths artifacts=${relativePaths.sorted()}"
+    }
+
+    val metadataText = distDir.resolve("sshsqlite-release-metadata.json").readText()
+    require(metadataText.contains("\"driverVersion\": \"$projectVersion\"")) { "Release metadata driverVersion does not match project version $projectVersion" }
+    require(metadataText.contains("\"protocolVersions\"")) { "Release metadata is missing protocolVersions" }
+    require(metadataText.contains("\"sqlite3PathDefault\"")) { "Release metadata is missing sqlite3PathDefault" }
+}
+
 fun verifyReleaseSecurity(distDir: File, allowUnsignedRelease: Boolean, projectVersion: String) {
     require(distDir.isDirectory) { "Missing release distribution directory: ${distDir.path}. Run ./gradlew packageRelease first." }
     val files = distributionFiles(distDir)
@@ -310,7 +460,7 @@ fun verifyReleaseSecurity(distDir: File, allowUnsignedRelease: Boolean, projectV
     require(metadataText.contains("\"protocolVersions\"")) { "Release metadata is missing protocolVersions" }
     require(metadataText.contains("\"sqlite3PathDefault\"")) { "Release metadata is missing sqlite3PathDefault" }
 
-    verifySha256Manifest(distDir, distDir.resolve("sshsqlite_SHA256SUMS"))
+    verifyReleaseDistributionContents(distDir, projectVersion)
     distDir.resolve("sshsqlite-helper_SHA256SUMS").takeIf { it.isFile }?.let { verifySha256Manifest(distDir, it) }
 
     require(distDir.resolve("sshsqlite-gradle-runtime-dependencies.json").isFile) { "Missing Gradle dependency inventory" }
@@ -429,6 +579,7 @@ val generateHelperHashManifest by tasks.registering {
 val generateGradleDependencyInventory by tasks.registering {
     group = "distribution"
     description = "Writes a JSON inventory of Gradle runtime dependencies used by release artifacts."
+    dependsOn(cleanReleaseDistribution)
     val inventory = releaseDistributionDir.map { it.file("sshsqlite-gradle-runtime-dependencies.json") }
     inputs.files(project(":driver").configurations.named("runtimeClasspath"))
     outputs.file(inventory)
@@ -507,6 +658,7 @@ val generateReleaseHashManifest by tasks.registering {
 val generateReleaseMetadata by tasks.registering {
     group = "distribution"
     description = "Writes release candidate version and compatibility metadata."
+    dependsOn(cleanReleaseDistribution)
     val metadata = releaseDistributionDir.map { it.file("sshsqlite-release-metadata.json") }
     outputs.file(metadata)
     doLast {
@@ -534,7 +686,17 @@ val generateReleaseMetadata by tasks.registering {
 tasks.register("packageRelease") {
     group = "distribution"
     description = "Packages release candidate driver artifacts under build/distributions."
-    dependsOn(packageDriverDistribution, generateReleaseMetadata, generateGradleDependencyInventory, generateReleaseHashManifest)
+    dependsOn(packageDriverDistribution, generateReleaseMetadata, generateGradleDependencyInventory, generateReleaseHashManifest, "verifyPackagedReleaseDistribution")
+    dependsOn("verifyDriverDistributionJar")
+}
+
+tasks.register("verifyPackagedReleaseDistribution") {
+    group = "verification"
+    description = "Asserts packaged release files and SHA-256 manifest are complete and consistent."
+    dependsOn(generateReleaseHashManifest)
+    doLast {
+        verifyReleaseDistributionContents(releaseDistributionDir.get().asFile, project.version.toString())
+    }
 }
 
 tasks.register("buildReleaseArtifacts") {
@@ -556,6 +718,22 @@ tasks.register("verifyDriverDistributionJar") {
             require(zip.getEntry("META-INF/services/java.sql.Driver") != null) { "Missing META-INF/services/java.sql.Driver in ${jar.name}" }
             require(zip.getEntry("org/sshsqlite/jdbc/SshSqliteDriver.class") != null) { "Missing SshSqliteDriver.class in ${jar.name}" }
             require(zip.getEntry("org/sshsqlite/jdbc/SshSqliteConnection.class") != null) { "Missing SshSqliteConnection.class in ${jar.name}" }
+            val entries = sequence {
+                val enumeration = zip.entries()
+                while (enumeration.hasMoreElements()) yield(enumeration.nextElement().name)
+            }.toList()
+            val signatureFiles = entries.filter { name ->
+                name.startsWith("META-INF/") && (name.endsWith(".SF") || name.endsWith(".DSA") || name.endsWith(".RSA") || name.endsWith(".EC"))
+            }
+            require(signatureFiles.isEmpty()) { "Driver jar contains dependency signature files: ${signatureFiles.joinToString()}" }
+            val excludedNativePrefixes = listOf(
+                "org/apache/sshd/agent/unix/",
+                "org/apache/sshd/common/io/apr/",
+                "org/apache/tomcat/jni/",
+                "io/netty/"
+            )
+            val nativeEntries = entries.filter { name -> excludedNativePrefixes.any { prefix -> name.startsWith(prefix) } }
+            require(nativeEntries.isEmpty()) { "Driver jar contains excluded native/APR packages: ${nativeEntries.take(10).joinToString()}" }
         }
     }
 }
@@ -658,7 +836,7 @@ tasks.register("verifyRelease") {
 
 tasks.register("generateToolEvidenceTemplate") {
     group = "help"
-    description = "Writes a guided DataGrip/DBeaver read-only evidence checklist and JSON templates."
+    description = "Writes a guided DBeaver read-only evidence checklist and JSON templates."
     doLast {
         val outputDir = layout.buildDirectory.dir("reports/tool-evidence-template").get().asFile
         Files.createDirectories(outputDir.toPath())
@@ -666,7 +844,7 @@ tasks.register("generateToolEvidenceTemplate") {
             buildString {
                 appendLine("# SSHSQLite Tool Evidence Template")
                 appendLine()
-                appendLine("Copy this structure to `tool-evidence/` for production read-only release validation. Do not include secrets; logs must be redacted.")
+                appendLine("Copy this structure to `tool-evidence/` for DBeaver release validation. Do not include secrets; logs must be redacted.")
                 appendLine()
                 appendLine("Required workflow IDs, in order:")
                 toolEvidenceWorkflowIds.forEach { appendLine("- `$it`") }
@@ -723,7 +901,7 @@ tasks.register("verifyToolEvidenceValidatorFixtures") {
         }
         fun passFailJson() = JsonOutput.prettyPrint(JsonOutput.toJson(mapOf("status" to "pass", "workflows" to toolEvidenceWorkflowIds.map { mapOf("id" to it, "status" to "pass") })))
         fun traceJson() = JsonOutput.prettyPrint(JsonOutput.toJson(mapOf("unexpectedMethods" to emptyList<String>())))
-        listOf("datagrip", "dbeaver").forEach { toolDir ->
+        listOf("dbeaver").forEach { toolDir ->
             writeEvidenceFile("$toolDir/redacted.log")
             writeEvidenceFile("$toolDir/diagnostics.txt")
             writeEvidenceFile("$toolDir/pass-fail.json", passFailJson())
@@ -735,7 +913,6 @@ tasks.register("verifyToolEvidenceValidatorFixtures") {
             "releaseScope" to "production-readonly-mvp",
             "workflows" to workflowObjects,
             "tools" to listOf(
-                "DataGrip" to "datagrip",
                 "DBeaver" to "dbeaver",
             ).map { (toolName, dirName) ->
                 mapOf(
@@ -775,7 +952,7 @@ tasks.register("verifyToolEvidenceValidatorFixtures") {
 
 tasks.register("verifyTools") {
     group = "verification"
-    description = "Validates DataGrip/DBeaver read-only GUI tool evidence. Use -PallowMissingToolEvidence=true only for development/preview."
+    description = "Validates DBeaver read-only GUI tool evidence. Use -PallowMissingToolEvidence=true only for development/preview."
     dependsOn("verifyToolEvidenceValidatorFixtures")
     doLast {
         val allowMissingToolEvidence = providers.gradleProperty("allowMissingToolEvidence").map { it.toBooleanStrictOrNull() ?: false }.getOrElse(false)

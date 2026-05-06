@@ -26,7 +26,6 @@ final class LocalProcessTransport implements Transport {
 
     static LocalProcessTransport start(List<String> command, ConnectionConfig config) throws IOException {
         ProcessBuilder builder = new ProcessBuilder(command);
-        builder.redirectErrorStream(true);
         Process process = builder.start();
         ExecutorService executor = Executors.newCachedThreadPool(r -> {
             Thread thread = new Thread(r, "sshsqlite-local-transport");

@@ -21,7 +21,7 @@ public class BaseDatabaseMetaData implements java.sql.DatabaseMetaData {
     @Override
     public boolean isReadOnly() throws java.sql.SQLException {
         checkOpen();
-        return true;
+        return connection.isReadOnly();
     }
 
     @Override

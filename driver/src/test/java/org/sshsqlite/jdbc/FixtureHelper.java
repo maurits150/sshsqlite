@@ -45,6 +45,9 @@ final class FixtureHelper {
             long id = request.path("id").asLong();
             String op = request.path("op").asText();
             if ("hello".equals(op)) {
+                if ("stderrDuringStartup".equals(mode)) {
+                    System.err.println("startup diagnostic on stderr only");
+                }
                 codec.writeJson(out, helloAck(id));
             } else if ("open".equals(op)) {
                 codec.writeJson(out, Map.of("id", id, "ok", true, "op", "openAck", "readonly", true));

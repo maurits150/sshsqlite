@@ -4,6 +4,9 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public final class SshSqliteConnection extends BaseConnection {
     private final ConnectionConfig config;
@@ -13,6 +16,8 @@ public final class SshSqliteConnection extends BaseConnection {
     private boolean transportClosed;
     private boolean autoCommit = true;
     private boolean activeTransaction;
+    private int explicitSavepointDepth;
+    private boolean transactionStartedBySavepoint;
 
     SshSqliteConnection(ConnectionConfig config, String url, Transport transport) {
         super();
@@ -84,14 +89,137 @@ public final class SshSqliteConnection extends BaseConnection {
             try {
                 transport.protocol().begin(config.transactionMode, config.queryTimeoutMs);
                 activeTransaction = true;
+                explicitSavepointDepth = 0;
+                transactionStartedBySavepoint = false;
             } catch (Exception e) {
                 throw sqlException(e);
             }
         }
     }
 
+    void ensureTransactionForStatement(String sql) throws SQLException {
+        checkOpen();
+        if (!autoCommit && !CliProtocolClient.containsExplicitTransactionControl(CliProtocolClient.splitSqlStatements(sql))) {
+            ensureTransactionForStatement();
+        }
+    }
+
     void transactionCompleted() {
         activeTransaction = false;
+        explicitSavepointDepth = 0;
+        transactionStartedBySavepoint = false;
+    }
+
+    void syncExplicitTransactionState(String sql) {
+        for (String statement : CliProtocolClient.splitSqlStatements(sql)) {
+            applyTransactionControl(statement);
+        }
+    }
+
+    void recoverFailedExplicitTransactionScript(String sql, Exception failure) {
+        List<String> statements = CliProtocolClient.splitSqlStatements(sql);
+        if (statements.size() <= 1 || !CliProtocolClient.containsExplicitTransactionControl(statements)) {
+            return;
+        }
+        int completedStatements = failure instanceof CliProtocolClient.ScriptExecutionException
+                ? ((CliProtocolClient.ScriptExecutionException) failure).completedStatements()
+                : 0;
+        boolean hadActiveTransaction = activeTransaction;
+        int initialSavepointDepth = explicitSavepointDepth;
+        String scriptSavepoint = firstOpenedSavepoint(statements, completedStatements, initialSavepointDepth);
+        for (int i = 0; i < completedStatements && i < statements.size(); i++) {
+            applyTransactionControl(statements.get(i));
+        }
+        if (scriptSavepoint != null) {
+            rollbackAndReleaseSavepoint(scriptSavepoint);
+            return;
+        }
+        if (activeTransaction && !hadActiveTransaction) {
+            rollbackFailedScriptTransaction();
+        }
+    }
+
+    private void applyTransactionControl(String statement) {
+        switch (CliProtocolClient.transactionControl(statement)) {
+            case BEGIN:
+                activeTransaction = true;
+                explicitSavepointDepth = 0;
+                transactionStartedBySavepoint = false;
+                break;
+            case COMMIT:
+            case ROLLBACK:
+                transactionCompleted();
+                break;
+            case SAVEPOINT:
+                if (!activeTransaction) {
+                    activeTransaction = true;
+                    transactionStartedBySavepoint = true;
+                }
+                explicitSavepointDepth++;
+                break;
+            case RELEASE:
+                if (explicitSavepointDepth > 0) {
+                    explicitSavepointDepth--;
+                }
+                if (explicitSavepointDepth == 0 && transactionStartedBySavepoint) {
+                    transactionCompleted();
+                }
+                break;
+            case ROLLBACK_TO:
+            case NONE:
+                break;
+        }
+    }
+
+    private String firstOpenedSavepoint(List<String> statements, int completedStatements, int initialSavepointDepth) {
+        int depth = initialSavepointDepth;
+        List<String> scriptSavepoints = new ArrayList<>();
+        for (int i = 0; i < completedStatements && i < statements.size(); i++) {
+            String statement = statements.get(i);
+            CliProtocolClient.TransactionControl control = CliProtocolClient.transactionControl(statement);
+            if (control == CliProtocolClient.TransactionControl.SAVEPOINT) {
+                depth++;
+                if (depth > initialSavepointDepth) {
+                    scriptSavepoints.add(CliProtocolClient.transactionControlName(statement));
+                }
+            } else if (control == CliProtocolClient.TransactionControl.RELEASE && depth > initialSavepointDepth) {
+                depth--;
+                if (!scriptSavepoints.isEmpty()) {
+                    scriptSavepoints.remove(scriptSavepoints.size() - 1);
+                }
+            } else if (control == CliProtocolClient.TransactionControl.ROLLBACK || control == CliProtocolClient.TransactionControl.COMMIT) {
+                depth = 0;
+                scriptSavepoints.clear();
+            }
+        }
+        return scriptSavepoints.isEmpty() ? null : scriptSavepoints.get(0);
+    }
+
+    private void rollbackAndReleaseSavepoint(String savepoint) {
+        if (savepoint == null || savepoint.isBlank()) {
+            broken = true;
+            return;
+        }
+        try {
+            transport.protocol().exec("ROLLBACK TO " + savepoint + "; RELEASE " + savepoint, null, config.queryTimeoutMs);
+            if (explicitSavepointDepth > 0) {
+                explicitSavepointDepth--;
+            }
+            if (explicitSavepointDepth == 0 && transactionStartedBySavepoint) {
+                transactionCompleted();
+            }
+        } catch (Exception cleanupFailure) {
+            broken = true;
+        }
+    }
+
+    private void rollbackFailedScriptTransaction() {
+        try {
+            transport.protocol().rollback(config.queryTimeoutMs);
+            transactionCompleted();
+        } catch (Exception rollbackFailure) {
+            broken = true;
+        }
     }
 
     public String diagnosticsBundle(String operation) throws SQLException {
@@ -233,12 +361,22 @@ public final class SshSqliteConnection extends BaseConnection {
         if (isClosed() || broken) {
             return false;
         }
+        var executor = Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r, "sshsqlite-is-valid");
+            thread.setDaemon(true);
+            return thread;
+        });
         try {
-            transport.protocol().ping();
-            return true;
+            Callable<Boolean> ping = () -> {
+                transport.protocol().ping();
+                return true;
+            };
+            return timeout == 0 ? executor.submit(ping).get() : executor.submit(ping).get(timeout, TimeUnit.SECONDS);
         } catch (Exception e) {
             broken = true;
             return false;
+        } finally {
+            executor.shutdownNow();
         }
     }
 
@@ -300,6 +438,20 @@ public final class SshSqliteConnection extends BaseConnection {
     }
 
     @Override
+    public void abort(java.util.concurrent.Executor executor) throws SQLException {
+        if (executor == null) {
+            throw JdbcSupport.invalidArgument("executor must not be null");
+        }
+        broken = true;
+        executor.execute(() -> {
+            try {
+                close();
+            } catch (SQLException ignored) {
+            }
+        });
+    }
+
+    @Override
     public void close() throws SQLException {
         SQLException failure = null;
         if (!isClosed() && activeTransaction && !transport.protocol().isBroken()) {
@@ -335,7 +487,7 @@ public final class SshSqliteConnection extends BaseConnection {
         ensureWritesAllowed();
         try {
             transport.protocol().commit(config.queryTimeoutMs);
-            activeTransaction = false;
+            transactionCompleted();
         } catch (Exception e) {
             if (transport.protocol().isBroken()) {
                 broken = true;
@@ -348,7 +500,7 @@ public final class SshSqliteConnection extends BaseConnection {
         ensureWritesAllowed();
         try {
             transport.protocol().rollback(config.queryTimeoutMs);
-            activeTransaction = false;
+            transactionCompleted();
         } catch (Exception e) {
             if (transport.protocol().isBroken()) {
                 broken = true;

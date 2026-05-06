@@ -140,12 +140,15 @@ public class BaseStatement implements java.sql.Statement {
         checkOpen();
         if (arg0 < 0) throw JdbcSupport.invalidArgument("max rows must be >= 0");
         maxRows = arg0;
+        largeMaxRows = arg0;
     }
 
     @Override
     public int getMaxRows() throws java.sql.SQLException {
         checkOpen();
-        return maxRows;
+        if (maxRows > 0) return maxRows;
+        if (largeMaxRows > 0) return largeMaxRows > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) largeMaxRows;
+        return 0;
     }
 
     @Override
@@ -153,6 +156,7 @@ public class BaseStatement implements java.sql.Statement {
         checkOpen();
         if (arg0 < 0) throw JdbcSupport.invalidArgument("max rows must be >= 0");
         largeMaxRows = arg0;
+        maxRows = arg0 > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) arg0;
     }
 
     @Override
@@ -228,6 +232,12 @@ public class BaseStatement implements java.sql.Statement {
     public boolean isCloseOnCompletion() throws java.sql.SQLException {
         checkOpen();
         return closeOnCompletion;
+    }
+
+    void resultSetCompleted() throws SQLException {
+        if (closeOnCompletion && !closed) {
+            close();
+        }
     }
 
     @Override

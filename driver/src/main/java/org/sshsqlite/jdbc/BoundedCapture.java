@@ -9,6 +9,7 @@ final class BoundedCapture implements Runnable {
     private final byte[] buffer;
     private int start;
     private int size;
+    private long totalBytes;
 
     BoundedCapture(InputStream input, int maxBytes) {
         this.input = input;
@@ -28,12 +29,26 @@ final class BoundedCapture implements Runnable {
         }
     }
 
+    synchronized long position() {
+        return totalBytes;
+    }
+
     synchronized String text() {
+        return textFromBuffer(0, size);
+    }
+
+    synchronized String textSince(long position) {
+        long firstBuffered = totalBytes - size;
+        int offset = (int) Math.min(size, Math.max(0, position - firstBuffered));
+        return textFromBuffer(offset, size - offset);
+    }
+
+    private String textFromBuffer(int offset, int length) {
         byte[] out = new byte[size];
-        for (int i = 0; i < size; i++) {
-            out[i] = buffer[(start + i) % buffer.length];
+        for (int i = 0; i < length; i++) {
+            out[i] = buffer[(start + offset + i) % buffer.length];
         }
-        String text = new String(out, StandardCharsets.UTF_8).replaceAll("[\\p{Cntrl}&&[^\\r\\n\\t]]", "?");
+        String text = new String(out, 0, length, StandardCharsets.UTF_8).replaceAll("[\\p{Cntrl}&&[^\\r\\n\\t]]", "?");
         return Redactor.sanitize(text);
     }
 
@@ -46,6 +61,7 @@ final class BoundedCapture implements Runnable {
                 buffer[start] = source[i];
                 start = (start + 1) % buffer.length;
             }
+            totalBytes++;
         }
     }
 }

@@ -1,29 +1,21 @@
-# SSHSQLite CLI Quickstart
+# SSHSQLite Quickstart
+
+> WARNING: SSHSQLite is experimental prototype software and is not production safe. Do not point it at important databases unless you have backups, understand the failure modes, and are prepared to debug or repair issues yourself.
 
 This quickstart uses the normal SSH backend: the Java driver starts the remote `sqlite3` CLI over SSH and sends SQL on stdin. Read/write connections are the default; set `readonly=true` only when you want an explicitly read-only session. No custom helper binary is required for normal use.
 
-## Build Or Download Artifacts
+## Grab The Jar
 
-For a local preview build:
+Use the prebuilt self-contained driver jar from this repo:
 
-```bash
-./gradlew packageRelease
+```text
+dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
 ```
 
-Release candidates are written under `build/distributions/`. Production operators should download the published driver jar, `sshsqlite_SHA256SUMS`, signed checksum evidence, signed provenance or attestation, dependency inventories, and release metadata from the trusted release location.
+Add that jar to your desktop database tool's custom JDBC driver libraries. The driver class is:
 
-Use `./gradlew verifyRelease` only after release artifacts already exist. Production verification fails closed without signed checksum and provenance evidence. Local unsigned preview candidates may be checked explicitly with `./gradlew verifyRelease -PallowUnsignedRelease=true -PallowMissingToolEvidence=true`, but those bypasses are development-only and do not support a production read-only claim.
-
-Optional production signing hooks can be supplied to `verifyRelease` with `-PcosignVerifyManifestCommand=...`, `-PgpgVerifyManifestCommand=...`, `-PcosignVerifyProvenanceCommand=...`, or `-PgpgVerifyProvenanceCommand=...`.
-
-## Verify Artifacts
-
-Verify the signed checksum manifest and provenance before installing anything. Example release commands, with placeholders replaced by the published release identity:
-
-```bash
-cosign verify-blob --bundle sshsqlite_SHA256SUMS.bundle --certificate-identity <release-identity> --certificate-oidc-issuer <issuer> sshsqlite_SHA256SUMS
-sha256sum -c sshsqlite_SHA256SUMS
-cosign verify-attestation --type slsaprovenance --certificate-identity <release-identity> --certificate-oidc-issuer <issuer> <artifact-ref>
+```text
+org.sshsqlite.jdbc.SshSqliteDriver
 ```
 
 ## Verify Remote SQLite
@@ -31,7 +23,7 @@ cosign verify-attestation --type slsaprovenance --certificate-identity <release-
 Install or verify a trusted `sqlite3` CLI on the SSH server:
 
 ```bash
-ssh sshsqlite@example.com '/usr/bin/sqlite3 --version'
+ssh alice@db.example.org '/usr/bin/sqlite3 --version'
 ```
 
 The SSH login user must not be able to replace `/usr/bin/sqlite3` or any parent directory. If you configure another `sqlite3.path`, verify that path and its parent directories are trusted.
@@ -41,8 +33,8 @@ The SSH login user must not be able to replace `/usr/bin/sqlite3` or any parent 
 Grant the SSH account only the database filesystem permissions needed for the intended mode:
 
 ```text
-/srv/app/data.db readable by sshsqlite for readonly=true
-/srv/app/data.db and sidecars readable/writable by sshsqlite for readonly=false
+/srv/app/app.db readable by the SSH account for readonly=true
+/srv/app/app.db and sidecars readable/writable by the SSH account for readonly=false
 /usr/bin/sqlite3 managed by the server package manager or operator
 ```
 
@@ -53,47 +45,102 @@ Do not put SQL or user-controlled database paths into ad hoc SSH shell commands.
 Pin the SSH host key locally:
 
 ```bash
-ssh-keyscan -p 22 example.com >> ~/.ssh/known_hosts
+Host-key verification uses `~/.ssh/known_hosts` by default. Configure your desktop tool or SSH environment the same way you normally do for SSH host verification.
 ```
 
 Review the scanned key fingerprint out of band before trusting it. Production connections must fail closed on unknown or changed host keys.
 
-## Configure JDBC
+## Configure DBeaver
 
-Minimal JDBC URL and properties:
+Create a new DBeaver driver with these settings:
 
 ```text
-jdbc:sshsqlite://sshsqlite@example.com:22/srv/app/data.db
+Driver Name: SSHSQLite
+Driver Type: Generic
+Class Name: org.sshsqlite.jdbc.SshSqliteDriver
+URL Template: jdbc:sshsqlite://{host}:{port}/{database}
+Default Port: 22
+```
 
-ssh.knownHosts=/home/me/.ssh/known_hosts
-ssh.privateKey=/home/me/.ssh/id_ed25519
-# or provide ssh.password through your application's Properties/credential store
-ssh.agent=false
+In the driver Libraries tab, add:
+
+```text
+dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
+```
+
+Create a connection with the full JDBC URL:
+
+```text
+jdbc:sshsqlite://alice@db.example.org:22/srv/app/app.db
+```
+
+Use the URL user (`alice@`) or set `ssh.user` as a driver property if your DBeaver workflow keeps the host and user fields separate.
+
+## Connection Properties
+
+Common properties:
+
+```text
 sqlite3.path=/usr/bin/sqlite3
 readonly=false
 ```
 
-Use connection `Properties` or the desktop tool property grid for secrets. Do not put passwords, private key material, or SQL in SSH commands. The driver starts `sqlite3` with `-batch`, adds `-readonly` only when `readonly=true`, passes the database path as the SQLite database argument, and sends SQL on stdin.
+Defaults:
 
-## Desktop Tool Setup Summary
+```text
+sqlite3.path=/usr/bin/sqlite3
+readonly=false
+ssh.knownHosts=~/.ssh/known_hosts
+ssh.agent=false
+```
 
-DataGrip and DBeaver setup is intentionally property-driven:
+If no password or private key is configured, the driver tries the first existing standard private key under `~/.ssh` in this order: `id_ed25519`, `id_ecdsa`, `id_rsa`, `id_dsa`, `identity`.
 
-1. Add the self-contained `sshsqlite-driver-<version>-all.jar` from the release artifacts.
-2. Use the `jdbc:sshsqlite://sshsqlite@example.com:22/srv/app/data.db` URL.
-3. Put `ssh.knownHosts`, `ssh.privateKey` or credential-store password, `sqlite3.path=/usr/bin/sqlite3`, and the intended `readonly` value in driver properties, not in the URL.
-4. Verify diagnostics show the expected driver version, SQLite CLI version, selected output mode, and `sqlite3.path`.
-5. Run read-only metadata browse and bounded `SELECT` workflows first; use `readonly=false` only after confirming database permissions and backup/restore expectations.
+Use connection properties or DBeaver's credential fields for secrets. Do not put passwords, private key material, or SQL in SSH commands. The driver starts `sqlite3` with `-batch`, adds `-readonly` only when `readonly=true`, passes the database path as the SQLite database argument, and sends SQL on stdin.
+
+Accepted desktop/JDBC aliases include:
+
+```text
+user, username, UID -> ssh.user
+password, pass, PWD -> ssh.password
+knownHosts, knownHostsFile -> ssh.knownHosts
+privateKey, privateKeyFile, keyFile, identityFile, sshKey -> ssh.privateKey
+privateKeyPassphrase, passphrase -> ssh.privateKeyPassphrase
+sqlite3Path, sqlitePath -> sqlite3.path
+database -> db.path
+```
+
+Explicit `ssh.*`, `sqlite3.path`, and `db.path` properties win over aliases when both are supplied.
+
+## Setup Summary
+
+DBeaver setup is intentionally simple and property-driven:
+
+1. Add `dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar` to the DBeaver driver libraries.
+2. Use `jdbc:sshsqlite://alice@db.example.org:22/srv/app/app.db`.
+3. Ensure `/usr/bin/sqlite3` exists on the remote SSH server, or set `sqlite3.path` to another trusted remote sqlite3 executable.
+4. Use the default `readonly=false` for normal read/write use, or set `readonly=true` for inspection-only sessions.
+5. Configure SSH auth through DBeaver fields or connection properties such as `ssh.privateKey`, `identityFile`, `ssh.password`, or `password`.
+6. Keep backups for any database you might modify.
+
+## Build Yourself
+
+If you want to rebuild the dist jar yourself, run:
+
+```bash
+./build.sh
+```
+
+That writes:
+
+```text
+dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
+dist/sshsqlite_SHA256SUMS
+```
 
 ## Local Verification
 
 ```bash
 ./gradlew verify
-./gradlew verifyIntegration
 ./gradlew packageRelease
-./gradlew verifyRelease -PallowUnsignedRelease=true -PallowMissingToolEvidence=true
-./gradlew generateToolEvidenceTemplate
-./gradlew verifyTools -PallowMissingToolEvidence=true
 ```
-
-For production release readiness, run `./gradlew verifyRelease` without unsigned or missing-evidence bypasses, run `./gradlew verifySoak -PsoakProfile=full`, and validate real DataGrip/DBeaver evidence with `./gradlew verifyTools`.

@@ -7,7 +7,7 @@ SSHSQLite is a JDBC driver that runs the remote `sqlite3` CLI over SSH:
 Phase 0 implementation choices are recorded in `docs/design-decisions.md`; this architecture document describes the resulting component boundaries and lifecycle.
 
 ```text
-DataGrip/DBeaver/custom Java app
+DBeaver/custom Java app
   -> SSHSQLite JDBC driver
   -> SSH session
   -> SSH exec channel
@@ -20,22 +20,22 @@ The `sqlite3` process is owned by one JDBC connection where practical. The drive
 
 ### Java JDBC Driver
 
-Read/write CLI MVP responsibilities:
+Current read/write CLI responsibilities:
 
 - Register JDBC URL prefix `jdbc:sshsqlite:`.
 - Parse JDBC URLs and connection properties with deterministic precedence rules.
 - Verify the SSH host key before authentication.
-- Authenticate through SSH using agent, key, or password according to configured policy.
+- Authenticate through SSH using a configured private key, a discovered standard private key from `~/.ssh`, or password authentication. SSH agent authentication is not supported by the self-contained driver jar today.
 - Start the remote `sqlite3` CLI safely with a deterministic configured path.
 - Pass the JDBC URL database path as the remote SQLite database path to `sqlite3`, using safe command construction.
 - Maintain the `sqlite3` stdin/stdout streams with dedicated read/write handling so idle connections remain usable where the CLI mode supports it.
 - Translate JDBC calls into controlled SQLite CLI input and dot commands.
 - Translate SQLite CLI output into `ResultSet`, update counts, metadata, and `SQLException` instances.
 - Support read and write SQL through the `sqlite3` CLI. `readonly` is a connection mode, not a product-wide limitation.
-- When `readonly=true`, pass `-readonly`, use read-only connection settings where supported, and reject mutations. When `readonly=false`, run `sqlite3` without `-readonly` and allow write SQL subject to SQLite permissions and locking.
-- Enforce JDBC method state transitions, close behavior, timeouts, and cancellation.
+- When `readonly=true`, pass `-readonly`, set `PRAGMA query_only=ON`, and reject JDBC write-method execution. SQLite still enforces statement-level read-only behavior for SQL sent through read paths. When `readonly=false`, run `sqlite3` without `-readonly` and allow write SQL subject to SQLite permissions and locking.
+- Enforce JDBC method state transitions, close behavior, and timeouts. `Statement.cancel()` is currently unsupported in CLI mode; query timeout aborts the underlying backend and marks the connection broken.
 - Close the `sqlite3` process, SSH channel, and SSH session deterministically.
-- Provide optional `DataSource`/pool integration in a future pooling release, capped at 5 physical connections when enabled.
+- Provide optional `SshSqliteDataSource` pooling, capped at 5 physical connections when `pool.enabled=true`.
 
 Minimal class set should include base adapters before concrete transport-aware classes:
 
@@ -55,7 +55,12 @@ SshSqlitePreparedStatement implements java.sql.PreparedStatement
 SshSqliteResultSet implements java.sql.ResultSet
 SshSqliteResultSetMetaData implements java.sql.ResultSetMetaData
 SshSqliteDatabaseMetaData implements java.sql.DatabaseMetaData
-SshSqliteTransport
+Transport
+SshTransport
+LocalProcessTransport
+CliProtocolClient
+ProtocolClient
+InMemoryResultSet
 ```
 
 The base adapters implement every method in the targeted Java `java.sql` interfaces. Concrete classes override supported behavior only. This prevents accidental `AbstractMethodError` when desktop tools call rarely used JDBC methods.
@@ -71,8 +76,8 @@ Responsibilities:
 - Use stable CLI output modes: `.headers on`, `.mode csv`, and a fixed `.nullvalue` sentinel. This avoids relying on `.mode json`, which older supported SQLite CLI versions lack.
 - Execute only SQL supplied as CLI stdin, never interpolated into a shell command.
 - Apply connection-local settings such as `.timeout`/busy timeout and safe output configuration.
-- Serve query results with bounded client memory; if the CLI cannot stream a workflow safely, document the limitation.
-- Handle query timeout and cancellation by closing the SSH channel or destroying the process unless a true interrupt path is implemented.
+- Serve query results through JDBC cursor/fetch APIs backed by a bounded in-memory CLI result buffer. This is not true network streaming; large results are limited by `cli.maxBufferedResultBytes`.
+- Handle query timeout by closing the SSH channel or destroying the process and marking the connection broken unless a true interrupt path is implemented later. `Statement.cancel()` is unsupported in CLI mode.
 
 `sshsqlite-helper` may still exist as a legacy, optional, or internal backend for experiments that need direct SQLite APIs such as authorizers or `sqlite3_interrupt`, but it is not required for normal use and must not be the default backend.
 
@@ -104,7 +109,7 @@ The `sqlite3` process is owned by one JDBC connection.
 - One JDBC connection starts one `sqlite3` process.
 - The CLI stdin/stdout streams remain open across statements on that connection where practical.
 - SQL and controlled dot commands use the same long-lived SSH exec channel, not per-query SSH commands.
-- The driver must run a continuous response reader so row batches, errors, EOF, and process death are detected promptly.
+- The driver must detect row batches, errors, EOF, and process death promptly during each active request. Current CLI mode uses a request-scoped reader plus bounded stderr capture rather than a continuously running stdout reader.
 - Idle connections should be validated with a lightweight CLI query and SSH keepalive rather than by restarting `sqlite3`.
 - Closing the JDBC connection closes CLI stdin, waits for process exit, then closes the SSH channel and session.
 - Close must use a bounded timeout. If `sqlite3` does not exit, the SSH channel must be forcibly closed.
@@ -124,8 +129,8 @@ Fatal connection conditions:
 | `sqlite3` exits during startup | Throw startup `SQLException` with sanitized stderr |
 | Unparsable CLI output | Mark connection broken and close channel |
 | SQLite busy timeout | Throw statement `SQLException`; connection usually remains usable |
-| Query timeout with safe interrupt and cleanup | Throw timeout `SQLException`; connection remains usable |
-| Query timeout without safe interrupt | Terminate `sqlite3` and mark connection broken |
+| Query timeout in current CLI mode | Terminate `sqlite3` or close the SSH channel and mark connection broken |
+| Future query timeout with safe interrupt and cleanup | Throw timeout `SQLException`; connection remains usable |
 | Remote EOF during active request | Mark connection broken; active statement fails |
 
 ## Deployment And Compatibility
@@ -161,15 +166,15 @@ MVP concurrency is intentionally narrow.
 
 ## Optional Connection Pool
 
-Plain `Driver.connect()` returns a physical JDBC connection backed by one SSH session, one `sqlite3` process, and one SQLite connection. Built-in pooling is not part of the CLI MVP. Pooling belongs in a future `SshSqliteDataSource` or an explicitly documented external-pool integration after the physical connection lifecycle is stable.
+Plain `Driver.connect()` returns a physical JDBC connection backed by one SSH session, one `sqlite3` process, and one SQLite connection. Built-in pooling is available only through the explicit `SshSqliteDataSource` entry point when `pool.enabled=true`; it is not used by plain `Driver.connect()`.
 
 Pooling contract:
 
-- Pooling is optional, future-release functionality and must be explicit.
-- The future built-in pool defaults to `pool.maxSize=5` when `pool.enabled=true`; raising above 5 is out of scope for the first pooling release.
+- Pooling is optional and must be explicit.
+- The built-in pool defaults to `pool.maxSize=5` when `pool.enabled=true`; configured values above 5 are capped at 5.
 - Each pooled physical connection owns its own SSH session, `sqlite3` process, and SQLite connection.
-- Pools are keyed by the full security context: SSH host, port, username, authentication identity, known-host policy, `sqlite3.path`, database path, readonly mode, output mode, and detected capabilities.
-- `db.path`, `readonly`, `sqlite3.path`, SSH identity, and detected capabilities are immutable for a physical pooled connection.
+- Pools are keyed by the configured security context: SSH host, port, username, authentication identity, known-host policy, `sqlite3.path`, database path, readonly mode, output mode, and helper/backend selection. Current CLI capabilities are fixed by that context; optional helper or future negotiated capability backends must include detected capabilities in the pool key.
+- `db.path`, `readonly`, `sqlite3.path`, SSH identity, helper/backend selection, and any negotiated capabilities are immutable for a physical pooled connection.
 - A read-write physical connection must never be reused for a readonly borrower.
 - Borrowed connections must be validated with `ping` before reuse if idle beyond the validation threshold.
 - Broken connections must be evicted immediately and never returned to the pool.
@@ -191,21 +196,21 @@ pool.validationTimeoutMs=5000
 pool.maxLifetimeMs=1800000
 ```
 
-## Result Streaming Requirement
+## Result Buffering And Fetching
 
-Production use must not rely on a single JSON response containing all rows.
+Current CLI mode must not claim true network streaming. It reads one complete sqlite3 CSV response into a bounded buffer, parses it, and exposes rows through JDBC fetch calls from an in-memory cursor.
 
-Required behavior:
+Current behavior:
 
-- Query results use cursor/fetch flow control: `queryStarted`, bounded `fetch`/`rowBatch` responses, and `closeCursor` or final `done` cleanup.
-- The driver/backend must bound rows per batch and bytes per batch.
+- Query results use cursor/fetch flow control at the JDBC protocol layer: `queryStarted`, bounded `fetch`/`rowBatch` responses, and `closeCursor` or final `done` cleanup.
+- The CLI client bounds total buffered result bytes with `cli.maxBufferedResultBytes` and aborts the backend if the bound is exceeded.
 - The driver must not buffer an unbounded result set in memory.
-- Closing a result set must finalize the remote SQLite statement promptly through `closeCursor` or a connection-fatal fallback.
+- Closing a result set releases the in-memory cursor. The remote sqlite3 statement has already completed before rows are exposed to JDBC.
 - `Statement.setMaxRows()` must be honored.
 - `Statement.setFetchSize()` should influence batch size but must not override hard safety limits.
-- If the desktop tool issues an unbounded query, the driver still applies configured safety limits unless explicitly disabled.
+- If the desktop tool issues an unbounded query, the driver still applies configured byte limits.
 
-MVP may temporarily buffer small result sets for a proof of concept, but that mode is not production-grade and must be clearly marked unsafe for large databases.
+Future true streaming would require row batches to be read incrementally from sqlite3 output without first materializing the full result. Until then, CLI mode is bounded-buffered and unsafe for very large unbounded result sets.
 
 ## Failure Model
 
@@ -214,7 +219,7 @@ Every failure must fall into one of these categories:
 | Category | Examples | Connection usable afterward |
 | --- | --- | --- |
 | Authentication/configuration | bad key, bad password, bad URL, missing `sqlite3` | No connection returned |
-| Authorization | DB path not allowed, readonly write rejected | Usually yes |
+| Authorization | readonly write rejected, optional helper allowlist rejection | Usually yes |
 | SQLite statement error | syntax error, constraint failure, no such table | Yes unless SQLite reports corruption/I/O fatality |
 | Locking | `SQLITE_BUSY`, `SQLITE_LOCKED`, busy timeout | Usually yes after statement cleanup |
 | Query timeout with safe interrupt | deadline exceeded and cleanup succeeded | Usually yes |

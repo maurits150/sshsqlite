@@ -5,14 +5,14 @@
 The canonical protocol runs over the stdin/stdout streams of a remote `sqlite3` CLI process started through an SSH exec channel. Any length-prefixed JSON helper protocol described in older sections is legacy/optional/internal and is not required for normal use.
 
 - stdout is query/result output only in the configured CLI mode.
-- stderr is diagnostic-only.
+- stderr is diagnostic-only and must be captured separately from stdout.
 - stdin and stdout remain open for the full `sqlite3` process lifetime where practical.
 - The driver sends controlled dot commands and SQL over the same stdin stream.
 - The `sqlite3` CLI sends result output over stdout.
 - EOF on either stream is a connection-level event, not a normal statement boundary.
 - The data stream is sequential with at most one active statement per connection in MVP.
 - Cancellation is SSH channel close or process destroy unless a true interrupt path exists.
-- Query rows should be consumed incrementally where the selected CLI mode allows it.
+- Current CLI mode buffers each statement response up to `cli.maxBufferedResultBytes`; future streaming-friendly CLI modes may consume rows incrementally.
 
 Command shape:
 
@@ -33,7 +33,7 @@ Use stable `sqlite3` CLI modes where practical:
 - Send only driver-controlled dot commands such as output mode, headers, null value, timeout, and optional safe diagnostics.
 - Reject or never expose dangerous dot commands including `.shell`, `.system`, `.read`, `.open`, `.load`, and arbitrary user-supplied dot commands.
 - Treat stderr as diagnostics, not as protocol data.
-- If a CLI mode buffers all rows before producing JSON, the driver must enforce `maxRows`/size limits or use a streaming-friendly mode for large results.
+- If a CLI mode buffers all rows before exposing a cursor, the driver must enforce `cli.maxBufferedResultBytes` and apply `maxRows` before returning rows to JDBC. `fetchSize` must not be described as true network streaming for this path.
 
 Parameter binding through the `sqlite3` CLI may be emulated or limited unless code implements a true binding path. Any emulation must quote values for SQLite input, never for shell syntax, and must be documented as less capable than direct SQLite prepared-statement binding. Acceptable CLI strategies include safe SQL literal rendering and controlled temporary parameter commands.
 
@@ -51,8 +51,8 @@ Rules:
 - CLI output writes and reads must be deadline-bound or tied to the request context where the transport can enforce it.
 - If stdout blocks past its deadline, the driver must close/destroy the process and mark the connection broken.
 - Tests must prove no stuck `sqlite3` process remains after stdout stalls.
-- The driver must run a continuous stdout reader for the connection lifetime so rows, EOF, and process death are detected promptly.
-- The driver must drain stderr independently so diagnostic output cannot block protocol progress.
+- The current driver runs one bounded stdout read task per active CLI statement. A future streaming CLI implementation may replace this with a continuous connection-lifetime reader.
+- The driver must drain stderr independently so diagnostic output cannot block protocol progress or corrupt CSV stdout parsing.
 - Idle validation uses a lightweight CLI validation query over the existing stream.
 - SSH keepalives should be enabled separately from CLI validation.
 - If validation fails or times out, the connection is broken and must be closed.
@@ -62,12 +62,11 @@ Suggested liveness defaults:
 ```text
 protocol.pingIntervalMs=30000
 protocol.pingTimeoutMs=5000
-transport.readTimeoutMs=0
 transport.writeTimeoutMs=10000
 stderr.maxBufferedBytes=65536
 ```
 
-`transport.readTimeoutMs=0` means the reader may block indefinitely while the connection is healthy; liveness comes from SSH EOF, SSH keepalive failure, CLI validation failure, query timeout, or user cancellation.
+The current implementation has no separate `transport.readTimeoutMs` property. Liveness comes from SSH EOF, SSH keepalive failure, CLI validation failure, query timeout, or cancellation when the selected backend supports it.
 
 ## Framing Rules
 
@@ -210,7 +209,7 @@ CLI open rules:
 - SQL is written only after startup validation succeeds.
 - If startup times out, exits, or produces unparsable validation output, the connection fails and the driver must start a fresh process for retry.
 - CLI mode relies on SSH account permissions and server operator controls for filesystem authorization. It must not claim helper-style server-side allowlist enforcement unless a helper backend is selected.
-- `readonly=false` is allowed for normal read/write use. A production safety property may require backup acknowledgement in hardened deployments, but it must not be required for basic DBeaver/DataGrip read/write setup.
+- `readonly=false` is allowed for normal read/write use. A production safety property may require backup acknowledgement in hardened deployments, but it must not be required for basic DBeaver read/write setup.
 - `adminSql` and `allowSchemaChanges` are reserved for optional policy/helper backends. Canonical CLI mode allows normal sqlite3 scripting when `readonly=false`.
 - SQLite open errors are structured setup errors, not protocol corruption.
 
@@ -342,9 +341,9 @@ Explicit typed values avoid ambiguity between SQL `NULL`, JSON `null`, text, byt
 
 ## Query
 
-Production query flow must avoid unbounded client memory. Helper mode can use cursor/fetch. CLI mode should stream CSV parser output where possible and enforce result-size limits for any buffered path.
+Production query flow must avoid unbounded client memory. Helper mode can use cursor/fetch. Current CLI mode reads one CSV statement response into a bounded buffer, parses it, then exposes an in-memory cursor to JDBC. Future CLI implementations may stream CSV parser output, but must still enforce limits for any buffered path.
 
-Current CLI mode enforces `cli.maxBufferedResultBytes` for each sqlite3 statement response. Exceeding the limit aborts sqlite3, marks the JDBC connection broken, and prevents an unbounded read lock or heap growth.
+Current CLI mode enforces `cli.maxBufferedResultBytes` for each sqlite3 statement response. Exceeding the limit aborts sqlite3, marks the JDBC connection broken, and prevents an unbounded read lock or heap growth. `Statement.setMaxRows()` is applied after parsing the bounded response; it limits rows returned to JDBC but does not reduce bytes read from sqlite3 in the current buffered implementation.
 
 Start request:
 
@@ -460,19 +459,19 @@ Query rules:
 
 - CLI mode sends SQL on stdin after configuring output mode. SQL must not be sent on the SSH command line.
 - True `params`/`namedParams` binding is available only when implemented by the selected backend; otherwise parameter support is emulated/limited as documented.
-- `queryStarted` means the statement is prepared and columns are known, not that all rows are buffered.
+- In helper/streaming backends, `queryStarted` means the statement is prepared and columns are known, not that all rows are buffered. In current CLI mode, the bounded CSV response has already been read and parsed before `queryStarted` is returned.
 - The backend must finalize or complete the active statement when the result is exhausted, the result set is closed, or the connection closes where the CLI/backend makes that observable.
-- Multi-statement handling must be explicit. The CLI MVP should reject multiple SQL statements for `executeQuery()` and `executeUpdate()` unless a tested batch/multi-statement path documents result and update-count behavior.
+- Multi-statement handling must be explicit. Current CLI mode allows normal sqlite3 scripts for write/update execution when they produce no result rows; JDBC update count is the final SQLite `changes()` value after the script. Multi-result-set behavior is not supported.
 - Statements that do not return rows must fail when invoked through `executeQuery()`.
 - `maxRows` limits total returned rows.
-- `fetchSize` is advisory and must be bounded by negotiated limits.
-- The helper must stop stepping once `maxRows` is reached and mark `truncated=true` if appropriate.
+- `fetchSize` is advisory for helper/streaming backends. In current CLI mode it controls only how many already-buffered rows are returned per JDBC fetch.
+- Helper/streaming backends must stop stepping once `maxRows` is reached and mark `truncated=true` if appropriate. Current CLI mode truncates the in-memory cursor to `maxRows` after parsing and does not currently report a protocol-level `truncated` flag.
 - Closing a JDBC `ResultSet`, closing its `Statement`, or executing a new statement on the same connection must send `closeCursor` when possible.
 - `closeCursor` is idempotent for the currently owned cursor and for an already-finalized cursor on the same connection.
 - Unknown cursor IDs from another generation or request must return a structured error.
 - If an active CLI query cannot be cleanly abandoned, the driver must close the SSH channel/process and mark the connection broken.
 - A timed-out query may have advanced SQLite even if its output was not delivered. The driver must not retry blindly; it must either prove cleanup or close the process and mark the connection broken.
-- In `autoCommit=true`, a streaming `SELECT` may keep a read transaction open until the cursor is exhausted or closed.
+- In helper/streaming backends with an active remote cursor, an `autoCommit=true` `SELECT` may keep a read transaction open until the cursor is exhausted or closed. Current CLI mode buffers the statement response before returning the JDBC result set, so it does not leave a remote SQLite cursor open after `queryStarted`.
 
 ## Exec
 
@@ -506,7 +505,7 @@ Response:
 
 Exec rules:
 
-- Multi-statement handling must be explicit. The CLI MVP rejects multiple SQL statements for `executeUpdate()` and `executeQuery()` before writing SQL to stdin.
+- Multi-statement handling must be explicit. Current CLI mode allows normal sqlite3 scripts for `executeUpdate()` when they produce no result rows; statements that produce CSV rows are not valid update execution.
 - The driver must bind or safely render either indexed `params` or `namedParams` before execution according to the selected CLI parameter strategy.
 - Statements that return rows must fail when invoked through `executeUpdate()`.
 - `changes` maps to JDBC update count where applicable and comes from SQLite `changes()` after successful execution. Statements that do not affect rows, including most DDL, report SQLite's `changes()` value, typically `0`.
@@ -619,7 +618,7 @@ Timeout teardown state machine:
 
 1. Pending data request exceeds its deadline.
 2. Driver marks the physical connection broken and tainted.
-3. Driver closes helper stdin/stdout and the SSH channel/session with bounded waits.
+3. Driver closes sqlite3/helper stdin/stdout and the SSH channel/session with bounded waits.
 4. Driver fails all waiters and rejects concurrent JDBC calls with connection-broken `SQLException`.
 5. Pool, if present in a future release, evicts the physical connection without ping-based reuse.
 

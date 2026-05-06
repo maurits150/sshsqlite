@@ -1,6 +1,6 @@
 # JDBC Metadata Result Sets
 
-This document defines the exact result-set shapes SSHSQLite must return for the metadata methods needed by JDBC tools and the JDBC specification. Column order follows the JDBC `DatabaseMetaData` contract. Unknown values use `null`, empty string, or conservative constants as specified here, but the column must still exist with the correct name and type.
+This document defines the exact result-set shapes SSHSQLite returns for implemented metadata methods, plus target shapes for metadata methods that are not implemented yet but are commonly expected by JDBC tools. Column order follows the JDBC `DatabaseMetaData` contract. Unknown values use `null`, empty string, or conservative constants as specified here, but implemented result sets must still include the column with the correct name and type.
 
 ## Shared Rules
 
@@ -27,7 +27,7 @@ Table editability:
 
 - Metadata defaults to non-writable unless safe identity is proven.
 - Views, virtual tables, FTS tables, generated/hidden columns, readonly connections, and internal `sqlite_%` objects are non-editable.
-- Rowid-only GUI editing is unsupported until pinned DataGrip/DBeaver evidence proves safe `_rowid_` handling.
+- Rowid-only GUI editing is unsupported until pinned DBeaver evidence proves safe `_rowid_` handling.
 - Production GUI editing requires an explicit `INTEGER PRIMARY KEY` or complete non-null primary-key metadata unless rowid evidence exists.
 
 ## `getTables(catalog, schemaPattern, tableNamePattern, types)`
@@ -175,7 +175,9 @@ Sort order: `PKTABLE_CAT`, `PKTABLE_SCHEM`, `PKTABLE_NAME`, `KEY_SEQ`.
 
 ## `getExportedKeys(catalog, schema, table)`
 
-Shape is identical to `getImportedKeys`.
+Status: target behavior. The current implementation does not override this method yet and reports it as unsupported.
+
+When implemented, shape is identical to `getImportedKeys`.
 
 Rules:
 
@@ -186,7 +188,9 @@ Sort order: `FKTABLE_CAT`, `FKTABLE_SCHEM`, `FKTABLE_NAME`, `KEY_SEQ`.
 
 ## `getCrossReference(parentCatalog, parentSchema, parentTable, foreignCatalog, foreignSchema, foreignTable)`
 
-Shape is identical to `getImportedKeys`.
+Status: target behavior. The current implementation does not override this method yet and reports it as unsupported.
+
+When implemented, shape is identical to `getImportedKeys`.
 
 Rules:
 
@@ -268,15 +272,20 @@ Additional rows should include common declared type spellings desktop tools expe
 
 Existing table columns must expose the original declared type from `PRAGMA table_xinfo.type` through `getColumns().TYPE_NAME`, while `getColumns().DATA_TYPE` remains the closest JDBC type from SQLite affinity rules.
 
-## Empty Metadata Result Sets
+## Implemented Empty Metadata Result Sets
 
-These methods return no rows in MVP but must return correctly shaped result sets:
+These methods currently return no rows but must return correctly shaped result sets:
 
 - `getProcedures`.
 - `getProcedureColumns`.
 - `getFunctions`.
 - `getFunctionColumns`.
 - `getUDTs`.
+
+## Target Empty Metadata Result Sets
+
+These methods are not implemented yet. When implemented, they should return no rows unless the driver adds explicit support for the feature, but they must still expose JDBC-specified columns in JDBC-specified order:
+
 - `getSuperTypes`.
 - `getSuperTables`.
 - `getAttributes`.

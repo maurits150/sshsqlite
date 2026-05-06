@@ -10,6 +10,9 @@ cd "$ROOT"
 
 mkdir -p "$DIST"
 cp "build/distributions/$JAR_NAME" "$DIST/$JAR_NAME"
-cp "build/distributions/sshsqlite_SHA256SUMS" "$DIST/sshsqlite_SHA256SUMS"
+(
+  cd "$DIST"
+  sha256sum "$JAR_NAME" > sshsqlite_SHA256SUMS
+)
 
 printf 'Built %s\n' "$DIST/$JAR_NAME"

@@ -107,7 +107,7 @@ public class BaseConnection implements java.sql.Connection {
     @Override
     public java.sql.DatabaseMetaData getMetaData() throws java.sql.SQLException {
         checkOpen();
-        return new SshSqliteDatabaseMetaData(this);
+        return new BaseDatabaseMetaData(this);
     }
 
     @Override

@@ -15,6 +15,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.List;
 import java.util.Properties;
 import java.util.ServiceLoader;
@@ -25,6 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -153,6 +156,54 @@ class JdbcInterfaceContractTest {
                 () -> assertFalse(driver.acceptsURL("jdbc:sqlite:/tmp/db.sqlite")),
                 () -> assertThrows(SQLException.class, () -> driver.connect("jdbc:sshsqlite://example/tmp/db.sqlite", new Properties()))
         );
+    }
+
+    @Test
+    void inMemoryResultSetBooleanObjectAndDateConversionsUseJdbcSemantics() throws Exception {
+        byte[] blob = new byte[] {1, 2};
+        InMemoryResultSet resultSet = new InMemoryResultSet(null, List.of(
+                new BaseResultSetMetaData.Column("flag", "flag", Types.VARCHAR, "TEXT", String.class.getName(), true),
+                new BaseResultSetMetaData.Column("blob", "blob", Types.BLOB, "BLOB", byte[].class.getName(), true),
+                new BaseResultSetMetaData.Column("bad_date", "bad_date", Types.VARCHAR, "TEXT", String.class.getName(), true)
+        ), List.of(List.of("1", blob, "bad-date")));
+
+        assertTrue(resultSet.next());
+        assertTrue(resultSet.getBoolean("flag"));
+        assertEquals(Boolean.TRUE, resultSet.getObject("flag", Boolean.class));
+        byte[] first = (byte[]) resultSet.getObject("blob", Object.class);
+        byte[] second = (byte[]) resultSet.getObject("blob", Object.class);
+        assertNotSame(first, second);
+        first[0] = 99;
+        assertEquals(1, second[0]);
+        byte[] untypedFirst = (byte[]) resultSet.getObject("blob");
+        byte[] untypedSecond = (byte[]) resultSet.getObject("blob");
+        assertNotSame(untypedFirst, untypedSecond);
+        untypedFirst[0] = 88;
+        assertEquals(1, untypedSecond[0]);
+        assertThrows(SQLException.class, () -> resultSet.getObject("bad_date", java.sql.Date.class));
+        assertNull(resultSet.getStatement());
+    }
+
+    @Test
+    void inMemoryResultSetNumericGettersRejectInvalidAndOverflowingConversions() throws Exception {
+        InMemoryResultSet resultSet = new InMemoryResultSet(null, List.of(
+                new BaseResultSetMetaData.Column("int_overflow", "int_overflow", Types.VARCHAR, "TEXT", String.class.getName(), true),
+                new BaseResultSetMetaData.Column("long_fraction", "long_fraction", Types.VARCHAR, "TEXT", String.class.getName(), true),
+                new BaseResultSetMetaData.Column("bad_number", "bad_number", Types.VARCHAR, "TEXT", String.class.getName(), true),
+                new BaseResultSetMetaData.Column("float_overflow", "float_overflow", Types.VARCHAR, "TEXT", String.class.getName(), true),
+                new BaseResultSetMetaData.Column("short_overflow", "short_overflow", Types.VARCHAR, "TEXT", String.class.getName(), true),
+                new BaseResultSetMetaData.Column("byte_overflow", "byte_overflow", Types.VARCHAR, "TEXT", String.class.getName(), true),
+                new BaseResultSetMetaData.Column("decimal", "decimal", Types.NUMERIC, "NUMERIC", java.math.BigDecimal.class.getName(), true)
+        ), List.of(List.of("2147483648", "1.5", "not-number", "1e39", "32768", "128", "123.45")));
+
+        assertTrue(resultSet.next());
+        assertThrows(SQLException.class, () -> resultSet.getInt("int_overflow"));
+        assertThrows(SQLException.class, () -> resultSet.getLong("long_fraction"));
+        assertThrows(SQLException.class, () -> resultSet.getDouble("bad_number"));
+        assertThrows(SQLException.class, () -> resultSet.getFloat("float_overflow"));
+        assertThrows(SQLException.class, () -> resultSet.getShort("short_overflow"));
+        assertThrows(SQLException.class, () -> resultSet.getByte("byte_overflow"));
+        assertEquals(new java.math.BigDecimal("123.45"), resultSet.getBigDecimal("decimal"));
     }
 
     private static void assertUnsupported(SqlRunnable runnable) {

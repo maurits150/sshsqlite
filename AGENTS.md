@@ -72,7 +72,7 @@ This file captures project-specific guidance for future agents. Keep changes ali
 - A class missing in DBeaver is a packaging bug until proven otherwise; do not ask users to add random transitive jars if the fat jar is supposed to be self-contained.
 - If excluding packages from shaded dependencies, verify no required common classes were removed.
 - Keep Java bytecode compatible with Java 11 unless the README and build target are deliberately changed.
-- DBeaver/DataGrip may run the driver in an isolated classloader. Do not assume classes from the IDE or local JDK extensions are visible.
+- Desktop tools may run the driver in an isolated classloader. Do not assume classes from the IDE or local JDK extensions are visible.
 - Shaded dependency changes should be followed by a clean rebuild, not only an incremental package task.
 
 ## Diagnostics And Redaction

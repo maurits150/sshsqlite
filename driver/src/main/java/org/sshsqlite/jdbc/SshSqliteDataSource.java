@@ -7,8 +7,12 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -311,10 +315,59 @@ public final class SshSqliteDataSource implements DataSource, AutoCloseable {
                 throw JdbcSupport.closedConnection();
             }
             try {
-                return method.invoke(entry.physical, args);
+                return wrapJdbcReturn(proxy, method.invoke(entry.physical, args));
             } catch (InvocationTargetException e) {
                 throw e.getCause();
             }
+        }
+
+        private Object wrapJdbcReturn(Object logicalConnection, Object value) {
+            if (value instanceof PreparedStatement) {
+                return proxyWithLogicalConnection(value, logicalConnection, PreparedStatement.class);
+            }
+            if (value instanceof Statement) {
+                return proxyWithLogicalConnection(value, logicalConnection, Statement.class);
+            }
+            if (value instanceof DatabaseMetaData) {
+                return proxyWithLogicalConnection(value, logicalConnection, DatabaseMetaData.class);
+            }
+            return value;
+        }
+
+        private Object proxyWithLogicalConnection(Object target, Object logicalConnection, Class<?> iface) {
+            return Proxy.newProxyInstance(
+                    SshSqliteDataSource.class.getClassLoader(),
+                    new Class<?>[]{iface},
+                    (proxy, method, args) -> {
+                        if ("getConnection".equals(method.getName()) && method.getParameterCount() == 0) {
+                            return logicalConnection;
+                        }
+                        try {
+                            Object owner = iface == DatabaseMetaData.class ? null : proxy;
+                            return wrapJdbcReturn(logicalConnection, owner, method.invoke(target, args));
+                        } catch (InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    });
+        }
+
+        private Object wrapJdbcReturn(Object logicalConnection, Object logicalStatement, Object value) {
+            if (value instanceof ResultSet) {
+                return Proxy.newProxyInstance(
+                        SshSqliteDataSource.class.getClassLoader(),
+                        new Class<?>[]{ResultSet.class},
+                        (proxy, method, args) -> {
+                            try {
+                                if ("getStatement".equals(method.getName()) && method.getParameterCount() == 0) {
+                                    return logicalStatement == null ? method.invoke(value, args) : logicalStatement;
+                                }
+                                return method.invoke(value, args);
+                            } catch (InvocationTargetException e) {
+                                throw e.getCause();
+                            }
+                        });
+            }
+            return value;
         }
     }
 
