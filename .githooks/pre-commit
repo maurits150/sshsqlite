@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED="$(readlink -f "$SCRIPT" 2>/dev/null || true)"
+  if [[ -n "$RESOLVED" ]]; then
+    SCRIPT="$RESOLVED"
+  fi
+fi
+ROOT="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
 "$ROOT/build.sh"

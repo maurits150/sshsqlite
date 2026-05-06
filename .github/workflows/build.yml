@@ -1,0 +1,37 @@
+name: Build JDBC Jar
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build distribution jar
+        run: ./build.sh
+
+      - name: Upload JDBC jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: sshsqlite-jdbc-driver
+          path: |
+            dist/sshsqlite-driver-0.1.0-SNAPSHOT-all.jar
+            dist/sshsqlite_SHA256SUMS
+          if-no-files-found: error

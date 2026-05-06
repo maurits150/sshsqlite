@@ -33,7 +33,7 @@ class UrlAndConfigTest {
                 "jdbc:sshsqlite://alice@db.example.org:22/srv/app/app.db",
                 new Properties());
 
-        assertEquals("root", config.sshUser);
+        assertEquals("alice", config.sshUser);
         assertEquals("db.example.org", config.sshHost);
         assertEquals(22, config.sshPort);
         assertEquals("/srv/app/app.db", config.dbPath);

@@ -32,11 +32,15 @@ The driver jar is compiled for Java 11 (`--release 11`) so it works in desktop d
 
 ## Server Requirements
 
+The remote server must have the `sqlite3` CLI installed. SSHSQLite does not upload SQLite or run an embedded server-side helper.
+
 Install or verify `sqlite3` on the SSH server:
 
 ```bash
 ssh alice@db.example.org '/usr/bin/sqlite3 --version'
 ```
+
+If that command fails, install SQLite on the server first, for example with your OS package manager.
 
 The SSH account needs filesystem permissions for the target database:
 
@@ -149,3 +153,7 @@ ssh alice@db.example.org '/usr/bin/sqlite3 --version'
 - The remote sqlite3 CLI path defaults to `/usr/bin/sqlite3` and uses CSV output mode for compatibility with SQLite 3.27.2 and newer.
 - Normal use does not require installing a custom helper binary.
 - Production release verification requires signed artifacts and real DBeaver/DataGrip evidence; development checks can use the documented Gradle bypass properties.
+
+## License
+
+MIT. See `LICENSE`.
