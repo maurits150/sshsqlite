@@ -14,6 +14,7 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -212,6 +213,15 @@ final class CliProtocolClient implements SqlClient {
         if (e instanceof SocketTimeoutException) {
             return new java.sql.SQLTimeoutException(e.getMessage(), "HYT00", e);
         }
+        if (isUnsupportedDropColumn(e)) {
+            return new SQLFeatureNotSupportedException("ALTER TABLE ... DROP COLUMN requires SQLite 3.35.0 or newer; remote sqlite3 is "
+                    + metadata.sqliteVersion(), "0A000", e);
+        }
+        FeatureGate featureGate = unsupportedFeature(e);
+        if (featureGate != null) {
+            return new SQLFeatureNotSupportedException(featureGate.description + " requires SQLite " + featureGate.minimumVersion
+                    + " or newer; remote sqlite3 is " + metadata.sqliteVersion(), "0A000", e);
+        }
         if (isLockContention(e)) {
             return new java.sql.SQLTransientException("SQLite lock contention: " + e.getMessage(), "HYT00", e);
         }
@@ -219,6 +229,75 @@ final class CliProtocolClient implements SqlClient {
             return JdbcSupport.brokenConnection("SSHSQLite sqlite3 CLI connection is broken", e);
         }
         return new SQLException(e.getMessage(), JdbcSupport.GENERAL_SQL_STATE, e);
+    }
+
+    private boolean isUnsupportedDropColumn(Exception e) {
+        if (compareSqliteVersion(metadata.sqliteVersion(), "3.35.0") >= 0) {
+            return false;
+        }
+        String message = e.getMessage();
+        if (message == null) return false;
+        String lower = message.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("near \"drop\": syntax error") || lower.contains("near \"drop\"");
+    }
+
+    private FeatureGate unsupportedFeature(Exception e) {
+        String message = e.getMessage();
+        if (message == null) return null;
+        String lower = message.toLowerCase(java.util.Locale.ROOT);
+        if (!lower.contains("syntax error")) return null;
+        if (compareSqliteVersion(metadata.sqliteVersion(), "3.35.0") < 0 && lower.contains("near \"returning\"")) {
+            return new FeatureGate("RETURNING", "3.35.0");
+        }
+        if (compareSqliteVersion(metadata.sqliteVersion(), "3.31.0") < 0 && lower.contains("near \"generated\"")) {
+            return new FeatureGate("Generated columns", "3.31.0");
+        }
+        if (compareSqliteVersion(metadata.sqliteVersion(), "3.37.0") < 0 && lower.contains("near \"strict\"")) {
+            return new FeatureGate("STRICT tables", "3.37.0");
+        }
+        if (compareSqliteVersion(metadata.sqliteVersion(), "3.33.0") < 0 && lower.contains("near \"from\"")) {
+            return new FeatureGate("UPDATE ... FROM", "3.33.0");
+        }
+        if (compareSqliteVersion(metadata.sqliteVersion(), "3.39.0") < 0 && (lower.contains("near \"right\"") || lower.contains("near \"full\""))) {
+            return new FeatureGate("RIGHT/FULL OUTER JOIN", "3.39.0");
+        }
+        if (compareSqliteVersion(metadata.sqliteVersion(), "3.30.0") < 0 && (lower.contains("near \"nulls\"") || lower.contains("near \"first\"") || lower.contains("near \"last\""))) {
+            return new FeatureGate("NULLS FIRST/LAST", "3.30.0");
+        }
+        return null;
+    }
+
+    private static final class FeatureGate {
+        final String description;
+        final String minimumVersion;
+        FeatureGate(String description, String minimumVersion) {
+            this.description = description;
+            this.minimumVersion = minimumVersion;
+        }
+    }
+
+    private static int compareSqliteVersion(String left, String right) {
+        int[] a = parseVersion(left);
+        int[] b = parseVersion(right);
+        for (int i = 0; i < 3; i++) {
+            int compare = Integer.compare(a[i], b[i]);
+            if (compare != 0) return compare;
+        }
+        return 0;
+    }
+
+    private static int[] parseVersion(String value) {
+        int[] result = new int[3];
+        if (value == null) return result;
+        String[] parts = value.split("\\.");
+        for (int i = 0; i < Math.min(3, parts.length); i++) {
+            try {
+                result[i] = Integer.parseInt(parts[i].replaceAll("[^0-9].*", ""));
+            } catch (NumberFormatException ignored) {
+                result[i] = 0;
+            }
+        }
+        return result;
     }
 
     private static boolean isLockContention(Exception e) {

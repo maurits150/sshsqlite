@@ -177,6 +177,29 @@ Current CLI portability limits:
 - The driver uses `.headers on`, `.mode csv`, and a fixed `.nullvalue` sentinel because `.mode json` is unavailable on supported older SQLite CLI versions such as 3.27.2.
 - Operators should treat the server package manager and `sqlite3 --version` output as the source of truth for the remote CLI binary.
 
+Remote SQLite version gates common user-visible SQL features. SSHSQLite passes SQL through to the remote CLI and does not rewrite modern SQL into older equivalents:
+
+| Feature | Requires SQLite |
+| --- | ---: |
+| `ALTER TABLE ... DROP COLUMN` | `3.35.0` |
+| `INSERT/UPDATE/DELETE ... RETURNING` | `3.35.0` |
+| `UPDATE ... FROM` | `3.33.0` |
+| Generated columns | `3.31.0` |
+| `STRICT` tables | `3.37.0` |
+| `PRAGMA table_list` | `3.37.0` |
+| `RIGHT JOIN` / `FULL OUTER JOIN` | `3.39.0` |
+| `IS DISTINCT FROM` / `IS NOT DISTINCT FROM` | `3.39.0` |
+| JSON `->` / `->>` operators and JSON functions built in by default | `3.38.0` |
+| JSON5 input support | `3.42.0` |
+| JSONB functions/storage format | `3.45.0` |
+| `MATERIALIZED` / `NOT MATERIALIZED` CTE hints | `3.35.0` |
+| `NULLS FIRST` / `NULLS LAST` | `3.30.0` |
+| Aggregate `ORDER BY`, e.g. `group_concat(x ORDER BY y)` | `3.44.0` |
+| Numeric literals with underscores, e.g. `1_000_000` | `3.46.0` |
+| `timediff()` date function | `3.46.0` |
+
+For recognizable old-server syntax failures, the driver reports `SQLFeatureNotSupportedException` with the required SQLite version and actual remote version.
+
 ### Production CLI Install Runbook
 
 This runbook is for the production CLI backend. It supports read-only and read/write connections through the remote `sqlite3` CLI. Claim production readiness only after `packageRelease`, production `verifyRelease`, full `verifySoak`, and `verifyTools` evidence all pass without development bypasses.

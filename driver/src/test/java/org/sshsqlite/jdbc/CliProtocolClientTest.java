@@ -18,6 +18,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLTransientException;
 import java.sql.Statement;
 import java.sql.Types;
@@ -65,6 +66,19 @@ class CliProtocolClientTest {
             try (Statement statement = fixture.connection().createStatement()) {
                 assertEquals(0, statement.executeUpdate("CREATE TABLE NewTable(id INTEGER)"));
                 assertEquals(0, statement.executeUpdate("DROP TABLE main.NewTable"));
+            }
+        }
+    }
+
+    @Test
+    void oldSqliteDropColumnReportsVersionRequirement() throws Exception {
+        try (Fixture fixture = open(false)) {
+            try (Statement statement = fixture.connection().createStatement()) {
+                assumeTrue(!sqliteVersionAtLeast(fixture.connection().sqliteVersion(), "3.35.0"), "local sqlite3 supports DROP COLUMN");
+                statement.executeUpdate("CREATE TABLE drop_column_old(a INTEGER, b INTEGER)");
+                SQLException error = assertThrows(SQLException.class, () -> statement.executeUpdate("ALTER TABLE main.drop_column_old DROP COLUMN b"));
+                assertTrue(error instanceof SQLFeatureNotSupportedException, error.toString());
+                assertTrue(error.getMessage().contains("requires SQLite 3.35.0"), error.getMessage());
             }
         }
     }
@@ -1402,6 +1416,25 @@ class CliProtocolClientTest {
     private static boolean sqliteSupportsReturning() throws Exception {
         Process process = new ProcessBuilder("/usr/bin/sqlite3", ":memory:", "CREATE TABLE t(v); INSERT INTO t(v) VALUES (1) RETURNING v;").start();
         return process.waitFor() == 0;
+    }
+
+    private static boolean sqliteVersionAtLeast(String version, String minimum) {
+        String[] actualParts = version.split("\\.");
+        String[] minimumParts = minimum.split("\\.");
+        for (int i = 0; i < 3; i++) {
+            int actual = i < actualParts.length ? parseVersionPart(actualParts[i]) : 0;
+            int required = i < minimumParts.length ? parseVersionPart(minimumParts[i]) : 0;
+            if (actual != required) return actual > required;
+        }
+        return true;
+    }
+
+    private static int parseVersionPart(String value) {
+        try {
+            return Integer.parseInt(value.replaceAll("[^0-9].*", ""));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     private static final class FailingAfterStartupOutputStream extends OutputStream {

@@ -356,6 +356,12 @@ Rules:
 
 Use `sqlite_master` for table/view discovery. `sqlite_schema` is only an alias in newer SQLite releases and is not available on SQLite 3.27.2, which is a supported remote CLI version. SQLite treats `main` as the primary database/schema, so user SQL and metadata SQL must treat `main.table_name` as valid rather than stripping or rewriting it.
 
+## Version-Gated SQL Features
+
+SSHSQLite does not rewrite modern SQLite syntax into older-compatible SQL. It sends user SQL to the remote `sqlite3` CLI, so the remote SQLite version decides which language features work. On SQLite 3.27.x, common unsupported features include `ALTER TABLE ... DROP COLUMN`, `RETURNING`, generated columns, `STRICT` tables, `UPDATE ... FROM`, `RIGHT/FULL JOIN`, JSON `->`/`->>` operators, and newer CLI modes such as `.mode json`.
+
+When old-version syntax errors are recognizable, the driver should report `SQLFeatureNotSupportedException` with the required SQLite version and actual remote version. It should not silently emulate schema-changing SQL such as `DROP COLUMN`, because safe emulation requires preserving indexes, triggers, constraints, foreign keys, rowids, and data-copy semantics.
+
 Tables and views:
 
 ```sql

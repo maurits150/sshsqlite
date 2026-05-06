@@ -135,6 +135,7 @@ ssh alice@db.example.org '/usr/bin/sqlite3 --version'
 
 - The driver requires Java 11 or newer.
 - The remote sqlite3 CLI path defaults to `/usr/bin/sqlite3` and uses CSV output mode for compatibility with SQLite 3.27.2 and newer.
+- The remote SQLite version controls SQL feature support. Older servers such as SQLite 3.27.x do not support newer syntax like `ALTER TABLE ... DROP COLUMN`, `RETURNING`, generated columns, `STRICT` tables, `RIGHT/FULL JOIN`, or `.mode json`.
 - Normal use does not require installing a custom helper binary.
 - Production release verification requires signed artifacts and real DBeaver evidence; development checks can use the documented Gradle bypass properties.
 
